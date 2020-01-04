@@ -1,14 +1,17 @@
 window.addEventListener('click', init);
+window.addEventListener('touchstart', init);
 var cnt = 0;
 var stdTime = (new Date()).getTime();
 
 function init() {
     window.removeEventListener("click", init);
+    window.removeEventListener("touchstart", init);
     document.getElementById("tts").hidden = true;
     document.getElementById("delay").hidden = false;
     setInterval(run, 800);
     stdTime = (new Date()).getTime();
-    window.addEventListener("click", touch)
+    window.addEventListener("click", touch);
+    window.addEventListener("touchstart", touch);
 }
 
 function run() {
