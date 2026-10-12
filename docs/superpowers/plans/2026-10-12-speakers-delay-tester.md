@@ -1580,7 +1580,6 @@ Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名�
   };
 
   let els = null;
-  let timerId = null;
   let lit = [];          // 每个点上一次是否处于"亮"的状态：null=没画过 / true=亮 / false=暗
 
   function rgba(rgb, alpha) {
@@ -1779,29 +1778,27 @@ git commit -m "Add indicator rendering driven by the audio clock"
   function endHold() {
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     if (holdButton) { holdButton.classList.remove('held'); holdButton = null; }
+    document.querySelector('.readout').setAttribute('aria-live', 'polite');
   }
 
+  // 这里只管数值：夹取、刷新读数。
+  // 音频那一半（取消已排、重排、pump）属于 Task 7 —— 调度器那时才存在。
+  // 现在就把 pump() 写进去的话，它是个未声明的标识符，一点按钮就 ReferenceError；
+  // 而 renderReadout() 在抛错之前已经执行，表现成"数字会动、别的地方坏了"，很难查。
   function applyDelay(next) {
     const clamped = T.clampDelay(next, T.delayMax(state.beatMs));
     if (clamped === state.delay) return;
     state.delay = clamped;
     renderReadout();
-
-    if (!state.running) return;
-    // 取消已排但还没响的音频，再从"被取消的最小拍号"和"第一个仍在未来的拍号"里取大的那个续排。
-    // 两个约束缺一不可（会多一声 / 会炸响），推导见 timing.js 里 resumeIndex 的注释和设计文档 §5.4。
-    const cancelled = SDT.audio.cancelPending();
-    state.nextIndex = T.resumeIndex(
-      state.nextIndex, cancelled,
-      SDT.audio.currentTime() * 1000, state.originMs, state.delay, state.beatMs
-    );
-    pump();
   }
 
   function beginHold(btn, step) {
     endHold();
     holdButton = btn;
     btn.classList.add('held');
+    // 连发时读数每秒要改几十次。aria-live 一直是 polite 的话，屏幕阅读器要么排队
+    // 要么来不及处理；先关掉，松手时再打开，于是它只会念出最终值那一次。
+    document.querySelector('.readout').setAttribute('aria-live', 'off');
     applyDelay(state.delay + step);
 
     const t0 = performance.now();
@@ -1833,15 +1830,10 @@ git commit -m "Add indicator rendering driven by the audio clock"
     window.addEventListener('pointerup', endHold);
     window.addEventListener('pointercancel', endHold);
 
-    // 归零走 restart() 而不是 applyDelay(0)：延迟一次跳太多时，
-    // 过渡那一拍的旧音和新音可能落在几十毫秒内 —— 两个起音挤在一起，
-    // 恰好污染了这个应用要测量的那个量。重启会先取消所有已排音频并重新起一轮
-    // （1.1s 的前导足够任何在响的音收尾），顺带"从左边重新开始"也更贴合"归零"的语义。
+    // Task 7 会把它改成走 restart()（理由见那里）。现在只改数值。
     document.getElementById('reset-btn').addEventListener('click', function () {
       endHold();
-      state.delay = 0;
-      renderReadout();
-      if (state.running) restart();
+      applyDelay(0);
     });
 
     // 桌面键盘：← → 调 1ms，Shift + ← → 调 10ms
@@ -1887,10 +1879,9 @@ Expected：
 4. `−10` 一路按到 0 以下，读数**停在 0**
 5. "归零"一键回到 0
 6. 桌面按 `←` `→` 各动 1ms，`Shift+←` `Shift+→` 各动 10ms
-7. **调延迟时节奏不中断**：连按 `+10` 期间，滴嗒声应当只有一个整体位移，不会出现某一拍重复响或整拍消失
 8. 手机上（或 DevTools 设备模拟）长按按钮**不会**触发文字选中、也**不会**触发双击缩放
 
-- [ ] **Step 4: 提交**
+- [ ] **Step 5: 提交**
 
 ```bash
 git add app.js
@@ -1911,12 +1902,16 @@ git commit -m "Add delay controls with press-and-hold repeat"
 
 删掉 Task 5 留下的 `tempStart()` 以及那段临时的 `document.addEventListener('click', ...)`。
 
-同时把模块顶部的 `let timerId = null;` 改成：
+同时把模块顶部声明 `els` / `lit` 的那两行改成：
 
 ```js
-  let timerId = null;
-  let frameStarted = false;   // 见 start()：音频丢失后遮罩会回来，用户再点一次时不能叠第二个 rAF 循环
+  let els = null;
+  let lit = [];                // 每个点上一次是否处于"亮"的状态：null=没画过 / true=亮 / false=暗
+  let timerId = null;          // 调度器轮询句柄
+  let frameStarted = false;    // 见 start()：音频丢失后遮罩会回来，用户再点一次时不能叠第二个 rAF 循环
 ```
+
+（`LOOKAHEAD_MS`、`TIMER_MS` 和 `I18N` 留在 Task 5 不动 —— 它们在设计文档 §4 的常量表里，是公开的调度契约而不是随手的状态；Task 7 起就会用到。真正该跟着使用处走的是 `timerId` 这种局部状态。）
 
 然后换成下面这套：
 
@@ -1939,6 +1934,33 @@ git commit -m "Add delay controls with press-and-hold repeat"
     state.nextIndex = r.nextIndex;
     SDT.audio.prune();
   }
+
+  // 把 Task 6 留下的 applyDelay 补成完整的：数值之外，还要把音频重排。
+  // （Task 6 里写不得 —— 那时 pump() 还不是个已声明的函数。）
+  //
+  // 在 applyDelay 的 renderReadout() 之后追加：
+  //
+  //     if (!state.running) return;
+  //     // 取消已排但还没响的音频，再从"被取消的最小拍号"和"第一个仍在未来的拍号"里取大的那个续排。
+  //     // 两个约束缺一不可（会多一声 / 会炸响），推导见 timing.js 里 resumeIndex 的注释和设计文档 §5.4。
+  //     const cancelled = SDT.audio.cancelPending();
+  //     state.nextIndex = T.resumeIndex(
+  //       state.nextIndex, cancelled,
+  //       SDT.audio.currentTime() * 1000, state.originMs, state.delay, state.beatMs
+  //     );
+  //     pump();
+  //
+  // 并把归零按钮改成走 restart() 而不是 applyDelay(0)：延迟一次跳太多时，
+  // 过渡那一拍的旧音和新音可能落在几十毫秒内 —— 两个起音挤在一起，恰好污染了这个应用要测量的那个量。
+  // 重启会先取消所有已排音频并重新起一轮（1.1s 的前导足够任何在响的音收尾），
+  // 顺带"从左边重新开始"也更贴合"归零"的语义。
+  //
+  //   document.getElementById('reset-btn').addEventListener('click', function () {
+  //     endHold();
+  //     state.delay = 0;
+  //     renderReadout();
+  //     if (state.running) restart();
+  //   });
 
   function restart() {
     SDT.audio.cancelPending();
@@ -2116,10 +2138,11 @@ python3 -m http.server 8000
 3. 点"开始"后约 1.1s 静默，然后第一声"滴"响起，同时第 1 个点闪亮
 4. 戴上蓝牙耳机，把延迟调到听觉与闪光重合 —— 这就是测量结果
 5. 暂停 → 声音和动效**同时**冻结；继续 → 从原处接上，不跳变
+6. **调延迟时节奏不中断**：连按 `+10` 期间，滴嗒声应当只有一个整体位移，不会出现某一拍重复响或整拍消失。这一条要等音频真的在响才能验，所以它属于这里而不是 Task 6
 6. 切到别的标签页再切回来 → 音画仍然同步（网页保持运行的前提下），并且**不会听到一串挤在一起的连响**（后台标签页的定时器被节流到约 1 秒一次，是这条路径最容易暴露的场景）。回来后音频会稀疏一阵再重新对齐到视觉网格上 —— 这是预期行为，不是故障
-7. 点「中/EN」→ 全部文案（含底部两行小字）立即切换，**标签页标题也跟着变**（它靠 `<title data-i18n="app.title">`，容易被漏看），刷新后仍是上次选的语言
-8. 手机 Chrome、iOS Safari 各走一遍上述流程；iOS 上确认静音拨片打开时仍有声
-9. **iOS 实测音频打断**：播放中锁屏再解锁，或触发一次来电/Siri，然后切回页面 —— 声音和动效必须都恢复。这是设计文档 §11 记的那条残余风险：`resume()` 现在会尝试恢复，但 WebKit 允许调用不等于真的成功。若回来之后指示器还在动、数字却不再跟随节奏（或干脆冻住），就是中招了 —— 那时要加一条明确的"请重新加载"提示，别让用户对着一个假活的仪器读数
+8. 点「中/EN」→ 全部文案（含底部两行小字）立即切换，**标签页标题也跟着变**（它靠 `<title data-i18n="app.title">`，容易被漏看），刷新后仍是上次选的语言
+9. 手机 Chrome、iOS Safari 各走一遍上述流程；iOS 上确认静音拨片打开时仍有声
+10. **iOS 实测音频打断**：播放中锁屏再解锁，或触发一次来电/Siri，然后切回页面 —— 声音和动效必须都恢复。这是设计文档 §11 记的那条残余风险：`resume()` 现在会尝试恢复，但 WebKit 允许调用不等于真的成功。若回来之后指示器还在动、数字却不再跟随节奏（或干脆冻住），就是中招了 —— 那时要加一条明确的"请重新加载"提示，别让用户对着一个假活的仪器读数
 
 - [ ] **Step 7: 提交验收记录**
 
@@ -2233,7 +2256,30 @@ git commit -m "Add browser self-test page"
 - Modify: `styles.css`（仅在实测发现问题时）
 - Modify: `README.md`（新建，说明怎么用和怎么加语言）
 
-- [ ] **Step 1: 逐档验证布局**
+- [ ] **Step 1: 在一台真机上量一次闪光帧有多贵**
+
+这是整个项目里唯一一个**靠推理定不了**的问题，必须实测。每帧要重写 `box-shadow`，
+而且**模糊半径本身在变**（`GLOW_DOT_PX * e`）—— sigma 一变，那块阴影就得从零重新光栅化。
+在手机尺寸下热点圆点的阴影面积约 99×99 CSS px（DPR 2 时约 4 万设备像素），
+低端机上粗略 0.5–2ms。单看不算什么，但它是这个应用里**唯一**可能掉帧的东西，
+而且掉在承载测量的那一帧上：闪光的上升沿就是从前一帧的静息直接跳到 `e = 1`，
+所以"听到的时刻"就是第一个跨过该拍的帧。在那里掉一帧 ≈ 17ms 误差 ——
+和设备自身那 10–40ms 延迟同一个量级。
+
+做法（随便一台手机，Chrome 远程调试即可）：
+
+1. DevTools → Performance，录一次约 10 秒的正常播放
+2. 看每个闪光帧上 Paint / Raster 占 16.7ms 预算的比例
+3. 再按住 `+10` 录一次（此时主线程还要跑连发的定时器），看会不会恶化
+
+**判据**：闪光帧的绘制若稳定低于约 3ms，就这样发布；若接近或超过半帧，就按下面顺序降级 ——
+- 先试"模糊半径固定、只动颜色透明度"（几何不变，光栅有机会复用），视觉上仍然会亮起来
+- 再试把半径调小（绘制面积按半径平方缩，30px→15px 约省 4 倍）
+- 最后才考虑把光晕拆成独立图层、用静态模糊 + 动 `opacity`（纯合成，但要多加节点）
+
+设计文档 §8.5 本来就写着"靠透明度做亮灭"，所以前两条不算改设计。
+
+- [ ] **Step 2: 逐档验证布局**
 
 在 DevTools 里依次切到 320×568、390×844、768×1024（竖）、1024×768（横）、1440×900：
 - 指示器、读数、四键在任何一档都不重叠、不溢出
@@ -2242,7 +2288,7 @@ git commit -m "Add browser self-test page"
 
 任何一档不达标，改 `styles.css` 里的 `clamp()` 参数或断点，改完重跑一遍。
 
-- [ ] **Step 2: 写 `README.md`**
+- [ ] **Step 3: 写 `README.md`**
 
 ```markdown
 # 无线耳机延迟测试器
@@ -2292,7 +2338,7 @@ git commit -m "Add browser self-test page"
 去掉 `hidden` 即可生效 —— 接线是通的，改间隔会自动重算循环长度、扫描头行程和延迟上限。
 ```
 
-- [ ] **Step 3: 最终全量验证**
+- [ ] **Step 4: 最终全量验证**
 
 ```bash
 node tools/run-tests.js
