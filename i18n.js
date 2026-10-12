@@ -33,12 +33,16 @@
 
   const FALLBACK = 'en';
 
+  // 只认自有属性。文案表和语言表都是普通对象，直接 obj[key] 会穿到原型链上 ——
+  // 'constructor'、'toString' 这种键会取到 Object 的方法而不是"没有这一项"。
+  // 语言维度和键维度都要走这道守卫，只守一边比不守更让人困惑。
+  function hasOwn(obj, key) {
+    return typeof key === 'string' && Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
   // 语言身份以文案表为准，这两个函数里不写死任何语言代码 ——
   // 加一门语言 = 往 strings 里加一条，不需要回来改逻辑。
-  // 顺带避免 strings['constructor'] 这类原型链上的键被当成"有这门语言"。
-  function hasLanguage(code) {
-    return typeof code === 'string' && Object.prototype.hasOwnProperty.call(strings, code);
-  }
+  function hasLanguage(code) { return hasOwn(strings, code); }
 
   // 纯函数：用户选过的优先，其次看浏览器语言的前两位
   function resolve(stored, navLang) {
@@ -50,13 +54,14 @@
     return FALLBACK;
   }
 
-  // 纯函数：语言不存在时回落到 en；键不存在时回落到键名本身（比 undefined 好排查）
+  // 纯函数：语言不存在时回落到 en；键不存在时回落到键名本身（比 undefined 好排查）。
+  // "不存在"以自有属性为准，所以 t('constructor', 'zh') 会返回 'constructor'，
+  // 而不是把 Object 构造函数塞进 textContent。
   function t(key, lang) {
     const table = hasLanguage(lang) ? strings[lang] : strings[FALLBACK];
-    const value = table[key];
-    if (value !== undefined) return value;
-    const fallback = strings[FALLBACK][key];
-    return fallback !== undefined ? fallback : key;
+    if (hasOwn(table, key)) return table[key];
+    if (hasOwn(strings[FALLBACK], key)) return strings[FALLBACK][key];
+    return key;
   }
 
   function detect() {

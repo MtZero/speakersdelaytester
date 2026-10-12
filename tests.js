@@ -317,6 +317,10 @@
     eq(SDT.i18n.t('controls.reset', 'zh'), '归零');
     eq(SDT.i18n.t('nope.missing', 'zh'), 'nope.missing');
     eq(SDT.i18n.t('app.title', 'klingon'), 'Latency Test', '未知语言回落到 en');
+    // 原型链上的键不是文案 —— 必须和普通缺键一样回落到键名，
+    // 否则会被塞进 textContent 渲染成一段函数源码
+    eq(SDT.i18n.t('constructor', 'zh'), 'constructor');
+    eq(SDT.i18n.t('toString', 'en'), 'toString');
   });
 
 })(typeof window !== 'undefined' ? window : globalThis);
