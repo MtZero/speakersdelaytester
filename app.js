@@ -30,7 +30,7 @@
 
   let els = null;
   let timerId = null;
-  let lit = [];          // 每个点上一次是否处于"亮"的状态，用来省掉绝大多数重绘
+  let lit = [];          // 每个点上一次是否处于"亮"的状态：null=没画过 / true=亮 / false=暗
 
   function rgba(rgb, alpha) {
     return 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + alpha.toFixed(3) + ')';
@@ -55,7 +55,7 @@
       needles: Array.prototype.slice.call(stage.querySelectorAll('.needle')),
       delayValue: document.getElementById('delay-value')
     };
-    lit = new Array(dots.length).fill(false);
+    lit = new Array(dots.length).fill(null);   // null = 还没画过，见 renderIndicator
   }
 
   function paintDot(el, rgb, e, idleAlpha) {
@@ -71,22 +71,34 @@
       : '0 0 ' + (GLOW_TICK_PX * e).toFixed(1) + 'px ' + rgba(rgb, 0.7 * e);
   }
 
-  // tMs 是相对 origin 的毫秒时间。tMs < 0 时什么都不会亮 ——
-  // 扫描头还没从最左端出发，第一拍也还没发生。
+  // tMs 是相对 origin 的毫秒时间。
   function renderIndicator(tMs) {
     const beatMs = state.beatMs;
     const cycle = T.cycleMs(beatMs, state.beats);
 
+    // 第一拍发生在 t = beatMs，在那之前一个点都不该亮。
+    // 不能直接信 beatAgeMs 的返回值：它对负数时间做环回取模（那是它有意为之、也有测试钉住的行为），
+    // 于是 t = -1000 会算出"第 1 个点恰好刚闪过"、t = 0 则轮到最后一个点 ——
+    // 用户点完开始会先看到三次没有声音对应的幽灵闪，然后才听到第一声。
+    // 整段前导必须是空的：先静着，然后第一声"滴"和第 1 个点的闪光一起出现。
+    const flashing = tMs >= beatMs;
+
     for (let i = 0; i < els.dots.length; i++) {
-      const e = Math.exp(-T.beatAgeMs(tMs, i, beatMs, cycle) / FLASH_DECAY_MS);
+      const e = flashing
+        ? Math.exp(-T.beatAgeMs(tMs, i, beatMs, cycle) / FLASH_DECAY_MS)
+        : 0;
       const rgb = i === 0 ? WARM : COOL;
       const idle = i === 0 ? IDLE_ALPHA_DI : IDLE_ALPHA;
 
       // e < 0.01 的短路只省掉"这一个点"的重写。衰减常数 70ms、阈值 0.01，
       // 意味着一个点每拍有 -70·ln(0.01) ≈ 322ms 处在阈值之上 ——
       // 整轮里仍约三分之二的帧在重绘。它不是便宜路径，别当性能保障。
+      //
+      // 判断写 lit[i] !== false 而不是 if (lit[i])：lit 初值是 null，表示"这一帧还没画过"。
+      // 用真值判断的话，从没亮过的点会一直挂着 CSS 里的中性灰占位色，
+      // 而它正下方对应的刻度已经是彩色 —— 开局那一秒这个对比很扎眼。
       if (e < 0.01) {
-        if (lit[i]) {
+        if (lit[i] !== false) {
           lit[i] = false;
           paintDot(els.dots[i], rgb, 0, idle);
         }
