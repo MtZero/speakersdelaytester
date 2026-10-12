@@ -818,7 +818,7 @@ git commit -m "Add bilingual string table with language resolution"
 <body>
 
 <div id="start-overlay" class="overlay">
-  <div class="overlay-icon">🎧</div>
+  <div class="overlay-icon" aria-hidden="true">🎧</div>
   <h1 class="overlay-title" data-i18n="start.title"></h1>
   <p class="overlay-sub" data-i18n="start.subtitle"></p>
   <button id="start-btn" class="overlay-btn" type="button" data-i18n="start.button"></button>
@@ -836,7 +836,7 @@ git commit -m "Add bilingual string table with language resolution"
     </span>
   </header>
 
-  <div class="indicator">
+  <div class="indicator" aria-hidden="true">
     <div class="stage" id="stage">
       <div class="dot" data-beat="0"></div>
       <div class="dot" data-beat="1"></div>
@@ -853,7 +853,7 @@ git commit -m "Add bilingual string table with language resolution"
     </div>
   </div>
 
-  <div class="readout"><span id="delay-value">0</span><em>ms</em></div>
+  <div class="readout" aria-live="polite"><span id="delay-value">0</span><span class="unit">ms</span></div>
 
   <div class="buttons">
     <button class="btn step" type="button" data-step="-10">−10</button>
@@ -877,6 +877,13 @@ git commit -m "Add bilingual string table with language resolution"
     <input id="interval-input" type="number" min="200" max="1000" step="50" value="500">
   ms</label>
 </div>
+
+<noscript>
+  <p style="padding:24px;text-align:center;color:#7d8899;font-size:14px;line-height:1.7">
+    这个页面需要 JavaScript 才能发声和计时。<br>
+    This page needs JavaScript to produce sound and keep time.
+  </p>
+</noscript>
 
 <script src="i18n.js"></script>
 <script src="timing.js"></script>
@@ -908,6 +915,21 @@ git commit -m "Add bilingual string table with language resolution"
   --needle-w: clamp(5px, 1.4vw, 7px);
   --needle-h: clamp(28px, 8vw, 40px);
   --stage-h: clamp(84px, 24vw, 116px);
+
+  /* 两条基准线各只定义一次。点和刻度必须共用同一个 y，
+     刻度、轨道、扫描头也必须共用同一个 y —— 否则"尺子"和"指针"会肉眼可见地对不齐。
+     这两个数字是承重的，不是样式偏好。 */
+  --dot-y: 19%;
+  --track-y: 74%;
+
+  /* 补几个一直散落在规则里的字面量。滴/嗒两色当初特意只留一个定义，
+     中性色这边却在悄悄长重复值 —— 趁 Task 9 动手改数字之前收拢。 */
+  --edge: #4a5d75;
+  --edge-soft: #232e3c;
+  --edge-press: #3a4d66;
+  --fg-weak: #75808f;
+  --fg-rgb: 234, 242, 251;
+  --dim-rgb: 125, 136, 153;
 }
 
 * { box-sizing: border-box; }
@@ -933,7 +955,12 @@ body {
 
 .overlay {
   position: fixed;
-  inset: 0;
+  /* 四个长写而不是 inset：inset 是 Safari 14.1+，而目标下限是 14+。
+     少了它遮罩会退化成收缩盒子，而这是应用唯一的入口。 */
+  top: 0;
+  right: 0;
+  bottom: 0;
+  left: 0;
   z-index: 10;
   background: var(--bg);
   display: flex;
@@ -956,13 +983,13 @@ body {
   font-weight: 600;
   color: var(--fg);
   background: var(--press);
-  border: 1px solid #4a5d75;
+  border: 1px solid var(--edge);
   border-radius: 12px;
   cursor: pointer;
   touch-action: manipulation;
   -webkit-tap-highlight-color: transparent;
 }
-.overlay-btn:active { background: #3a4d66; }
+.overlay-btn:active { background: var(--edge-press); }
 .overlay-error {
   margin: 14px 0 0;
   font-size: 13px;
@@ -1010,14 +1037,13 @@ body {
 #lang-btn [data-lang-tag] { opacity: .4; }
 #lang-btn[data-lang="zh"] [data-lang-tag="zh"],
 #lang-btn[data-lang="en"] [data-lang-tag="en"] { opacity: 1; color: var(--fg); font-weight: 600; }
-#pause-btn[hidden] { display: none; }
 
 /* ─────────── 指示器 ─────────── */
 
 .indicator {
   background: var(--panel);
   border-radius: 16px;
-  padding: 0 20px;
+  padding: 8px 20px 10px;
 }
 .stage { position: relative; height: var(--stage-h); }
 
@@ -1026,15 +1052,15 @@ body {
 .dot {
   --d: var(--dot-size);
   position: absolute;
-  top: 19%;
+  top: var(--dot-y);
   left: 0;
   width: var(--d);
   height: var(--d);
   margin-left: calc(var(--d) / -2);
   margin-top: calc(var(--d) / -2);
   border-radius: 50%;
-  background: rgba(125, 136, 153, .12);
-  will-change: transform, background, box-shadow;
+  background: rgba(var(--dim-rgb), .12);
+  will-change: transform;
 }
 .dot[data-beat="0"] { --d: calc(var(--dot-size) * 1.3); }
 
@@ -1042,29 +1068,31 @@ body {
   position: absolute;
   left: 0;
   right: 0;
-  top: 74%;
+  top: var(--track-y);
   height: 4px;
   margin-top: -2px;
   border-radius: 2px;
   background: var(--slot);
+  z-index: 0;
 }
 
 .tick {
   position: absolute;
-  top: 74%;
+  top: var(--track-y);
   left: 0;
   width: 3px;
   height: var(--tick-h);
   margin-top: calc(var(--tick-h) / -2);
   margin-left: -1.5px;
   border-radius: 2px;
-  background: rgba(125, 136, 153, .2);
-  will-change: background, box-shadow;
+  background: rgba(var(--dim-rgb), .2);
+  /* z-index 高于轨道：否则不透明的轨道会横穿刻度中间，把闪光切成两截 */
+  z-index: 1;
 }
 
 .needle {
   position: absolute;
-  top: 74%;
+  top: var(--track-y);
   left: 0;
   width: var(--needle-w);
   height: var(--needle-h);
@@ -1072,9 +1100,12 @@ body {
   margin-left: calc(var(--needle-w) / -2);
   border-radius: 3px;
   background: var(--fg);
-  box-shadow: 0 0 14px rgba(234, 242, 251, .7);
+  box-shadow: 0 0 14px rgba(var(--fg-rgb), .7);
   opacity: 0;
-  will-change: left, opacity;
+  z-index: 2;
+  /* 只有 opacity 值得提示。left 是布局属性，浏览器没法把它交给合成器 ——
+     写 will-change: left 等于在文件里编进一个假的成本模型。 */
+  will-change: opacity;
 }
 
 /* ─────────── 读数与按钮 ─────────── */
@@ -1086,12 +1117,16 @@ body {
   line-height: 1;
 }
 .readout #delay-value {
+  /* 固定宽度并右对齐：否则 9→10、99→100 时数字和 ms 会整体横移，
+     长按连发时这种抖动最明显，仪表盘上看着像不稳定 */
+  display: inline-block;
+  min-width: 3ch;
+  text-align: right;
   font-size: clamp(44px, 14vw, 60px);
   font-weight: 600;
   letter-spacing: -.02em;
 }
-.readout em {
-  font-style: normal;
+.readout .unit {
   font-size: 15px;
   color: var(--fg-dim);
   margin-left: 6px;
@@ -1099,6 +1134,10 @@ body {
 
 .buttons { display: flex; gap: 9px; margin-bottom: 9px; }
 .buttons.sub { margin-bottom: 0; }
+
+/* 长按调整是这应用最主要的操作。manipulation 仍然允许平移，
+   手指稍一滑动就可能被判成滚动、触发 pointercancel 掐断连发。 */
+.btn.step { touch-action: none; }
 
 .btn {
   flex: 1;
@@ -1118,21 +1157,29 @@ body {
   -webkit-user-select: none;
   transition: background .07s, transform .07s;
 }
-.btn.held, .btn:active { background: var(--press); border-color: #4a5d75; transform: scale(.97); }
+.btn.held, .btn:active { background: var(--press); border-color: var(--edge); transform: scale(.97); }
 .buttons.sub .btn {
   font-size: 13px;
   font-weight: 500;
   color: var(--fg-dim);
   padding: 9px 4px;
   background: transparent;
-  border-color: #232e3c;
+  border-color: var(--edge-soft);
+}
+
+.btn:focus-visible, .tool:focus-visible, .overlay-btn:focus-visible {
+  outline: 2px solid var(--fg-dim);
+  outline-offset: 2px;
 }
 
 /* ─────────── 底部提示 ─────────── */
 
 .foot { margin-top: auto; padding-top: 18px; text-align: center; }
-.foot-hint { margin: 0; font-size: 12px; line-height: 1.6; color: var(--fg-faint); }
-.foot-caveat { margin: 6px 0 0; font-size: 11px; line-height: 1.6; color: #414c5a; }
+/* 两行都必须读得清。原来 hint 是 3.25:1、caveat 是 2.17:1，都低于小字要求的 4.5:1 ——
+   而 caveat 恰恰是那句"读数含设备自身延迟、不是绝对值"，写得看不见等于没写。
+   现在 hint 5.28:1、caveat 4.72:1，仍保留"第二行更弱"的层次。 */
+.foot-hint { margin: 0; font-size: 12px; line-height: 1.6; color: var(--fg-dim); }
+.foot-caveat { margin: 6px 0 0; font-size: 11px; line-height: 1.6; color: var(--fg-weak); }
 ```
 
 - [ ] **Step 3: 删掉原型遗留文件**
@@ -1424,8 +1471,11 @@ git commit -m "Add audio engine: tone synthesis and scheduling primitives"
       const rgb = i === 0 ? WARM : COOL;
       const idle = i === 0 ? IDLE_ALPHA_DI : IDLE_ALPHA;
 
+      // e < 0.01 的短路只省掉"这一个点"的重写。衰减常数 70ms、阈值 0.01，
+      // 意味着一个点每拍有 -70·ln(0.01) ≈ 322ms 处在阈值之上 ——
+      // 整轮里仍约三分之二的帧在重绘。它不是便宜路径，别当性能保障。
       if (e < 0.01) {
-        if (lit[i]) {           // 衰减早已结束，不必每帧重写 —— 一拍里约 85% 的帧走这条路
+        if (lit[i]) {
           lit[i] = false;
           paintDot(els.dots[i], rgb, 0, idle);
         }
@@ -1576,6 +1626,13 @@ git commit -m "Add indicator rendering driven by the audio clock"
         beginHold(btn, step);
       });
       btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+      // 键盘和辅助技术激活 <button> 时派发的是合成 click，pointerdown 根本不会触发 ——
+      // 只接 pointerdown 的话，聚焦到按钮再按回车是没有反应的。
+      // detail === 0 是合成点击（键盘/AT），鼠标和触摸是 1，用它避免一次按压走两步。
+      btn.addEventListener('click', function (e) {
+        if (e.detail === 0) applyDelay(state.delay + step);
+      });
     }
     // 释放监听到 window 上：手指滑出按钮再松开也要停
     window.addEventListener('pointerup', endHold);
