@@ -744,7 +744,8 @@ Expected: 新增 6 个用例 `FAIL`，错误是 `Cannot read properties of undef
       'controls.resume': '继续',
       'hint': '戴上耳机，把“滴嗒嗒哒”调到与闪动的点完全重合',
       'caveat': '读数还包含设备自身的音频与显示延迟（通常 10–40 ms），适合横向比较耳机，不是实验室级绝对值',
-      'error.noAudio': '当前浏览器不支持 Web Audio，无法运行'
+      'error.noAudio': '当前浏览器不支持 Web Audio，无法运行',
+      'error.audioLost': '音频被系统中断，没能自动恢复。点下面的按钮重新开始。'
     },
     en: {
       'app.title': 'Latency Test',
@@ -756,7 +757,8 @@ Expected: 新增 6 个用例 `FAIL`，错误是 `Cannot read properties of undef
       'controls.resume': 'Resume',
       'hint': 'Wear your headphones and adjust until the beat lines up with the dots',
       'caveat': "Includes your device's own audio and display latency (typically 10–40 ms) — good for comparing headphones, not a lab-grade figure",
-      'error.noAudio': 'This browser does not support Web Audio'
+      'error.noAudio': 'This browser does not support Web Audio',
+      'error.audioLost': 'Audio was interrupted by the system and could not recover. Tap below to restart.'
     }
   };
 
@@ -1565,6 +1567,7 @@ git commit -m "Add audio engine with a testable tone synthesiser"
 
   let els = null;
   let timerId = null;
+  let frameStarted = false;
   let lit = [];          // 每个点上一次是否处于"亮"的状态，用来省掉绝大多数重绘
 
   function rgba(rgb, alpha) {
@@ -1854,6 +1857,7 @@ git commit -m "Add delay controls with press-and-hold repeat"
 
 **Files:**
 - Modify: `app.js`
+- Modify: `i18n.js`（加 `error.audioLost`，两种语言都要加；键一致性测试会自动覆盖它）
 
 - [ ] **Step 1: 加前瞻调度器与启动流程**
 
@@ -1894,6 +1898,9 @@ git commit -m "Add delay controls with press-and-hold repeat"
       return;
     }
     SDT.audio.init();
+    // start() 一定跑在用户手势里，而手势正是浏览器允许恢复音频的唯一时机 ——
+    // 从"音频被系统打断"里回来就靠这一下（见下面的 showAudioLost）。
+    SDT.audio.resume();
     state.running = true;
     state.paused = false;
     restart();
@@ -1901,7 +1908,26 @@ git commit -m "Add delay controls with press-and-hold repeat"
     timerId = setInterval(pump, TIMER_MS);
     document.getElementById('start-overlay').hidden = true;
     document.getElementById('app').hidden = false;
-    requestAnimationFrame(frame);
+    document.getElementById('start-error').hidden = true;
+    // 只起一次：音频丢失后遮罩会重新出现，用户再点一次 start() 时
+    // 不能再叠一个 rAF 循环，否则每帧渲染两遍
+    if (!frameStarted) {
+      frameStarted = true;
+      requestAnimationFrame(frame);
+    }
+  }
+
+  // 音频被系统打断且没能自动恢复。这时 ctx.currentTime 已经冻住，
+  // 指示器跟着冻住，但界面看着一切正常 —— 用户会对着一个假活的仪器读数。
+  // 与其静默，不如把遮罩放回来：恢复音频需要用户手势，而遮罩正是收集手势的地方。
+  function showAudioLost() {
+    state.running = false;
+    if (timerId) { clearInterval(timerId); timerId = null; }
+    state.paused = false;
+    const err = document.getElementById('start-error');
+    err.textContent = I18N.t('error.audioLost', currentLang);
+    err.hidden = false;
+    document.getElementById('start-overlay').hidden = false;
   }
 ```
 
@@ -1941,8 +1967,15 @@ git commit -m "Add delay controls with press-and-hold repeat"
 
     // 切回前台时若音频上下文被挂起，恢复它。
     // 因为一切以 ctx.currentTime 为准，不需要做任何重新对齐。
+    // 切回前台时恢复音频。因为一切以 ctx.currentTime 为准，恢复本身不需要重新对齐。
+    // 但"允许调用 resume()"不等于"真的恢复了" —— WebKit 在刚被打断之后可能拒绝，
+    // 所以隔一会儿复查一次；那时只有 state.paused 还说好，实际已经冻住了。
     document.addEventListener('visibilitychange', function () {
-      if (!document.hidden && state.running && !state.paused) SDT.audio.resume();
+      if (document.hidden || !state.running || state.paused) return;
+      SDT.audio.resume();
+      setTimeout(function () {
+        if (state.running && !state.paused && SDT.audio.state() !== 'running') showAudioLost();
+      }, 600);
     });
   }
 ```
