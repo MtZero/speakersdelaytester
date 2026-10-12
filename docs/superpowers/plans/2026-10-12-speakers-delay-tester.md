@@ -39,7 +39,8 @@ SDT.timing.delayMax(beatMs)                    -> number
 SDT.timing.startLeadMs(beatMs)                 -> number
 SDT.timing.visualOffsetMs(n, beatMs)           -> number
 SDT.timing.audioOffsetMs(n, beatMs, delayMs)   -> number
-SDT.timing.firstFutureIndex(nowMs, originMs, delayMs, beatMs[, safetyMs]) -> number
+SDT.timing.firstFutureIndex(nowMs, originMs, delayMs, beatMs[, cutoffMs]) -> number
+SDT.timing.resumeIndex(nextIndex, cancelled, nowMs, originMs, delayMs, beatMs) -> number
 SDT.timing.clampDelay(v, max)                  -> number
 SDT.timing.dotPosition(i, segments)            -> number   // 0..1
 SDT.timing.beatAgeMs(tMs, i, beatMs, cycle)    -> number
@@ -220,15 +221,15 @@ process.exit(failed === 0 ? 0 : 1);
     const n = T.firstFutureIndex(nowMs, originMs, delayMs, beatMs);
     const at = function (k) { return originMs + T.audioOffsetMs(k, beatMs, delayMs); };
     eq(n, 18);
-    eq(at(n) > nowMs + T.SAFETY_MS, true, '第 n 拍应在安全线之后');
-    eq(at(n - 1) > nowMs + T.SAFETY_MS, false, '第 n-1 拍不应在安全线之后');
+    eq(at(n) > nowMs + T.CANCEL_CUTOFF_MS, true, '第 n 拍应在这条线之后');
+    eq(at(n - 1) > nowMs + T.CANCEL_CUTOFF_MS, false, '第 n-1 拍不应在这条线之后');
   });
 
   run('firstFutureIndex: 边界处不会提前半拍', function () {
     // 第 18 拍的音频时刻 = 1100 + (19*500 - 200) = 10400。
-    // 安全线是 now+20，所以 now < 10380 时第 18 拍还排得上，到 10380 就必须换成第 19 拍。
-    eq(T.firstFutureIndex(10379, 1100, 200, 500), 18);
-    eq(T.firstFutureIndex(10380, 1100, 200, 500), 19);
+    // 分界线是 now+5，所以 now < 10395 时第 18 拍还排得上，到 10395 就必须换成第 19 拍。
+    eq(T.firstFutureIndex(10394, 1100, 200, 500), 18);
+    eq(T.firstFutureIndex(10395, 1100, 200, 500), 19);
   });
 
   run('resumeIndex: 什么都没有被取消时，不回退到更小的拍号', function () {
@@ -251,6 +252,16 @@ process.exit(failed === 0 ? 0 : 1);
     eq(T.resumeIndex(3, [3], 3000, 1100, 500, 500), 4);
     // 对照：同样的取消集合，不改延迟时第 3 拍仍在未来，就该从第 3 拍续
     eq(T.resumeIndex(3, [3], 3000, 1100, 0, 500), 3);
+  });
+
+  run('resumeIndex: 仍在未来的拍不能被丢掉 —— 分界线必须和音频层一致', function () {
+    // 第 3 拍改延迟后落在 1100+2000-90 = 3010，也就是 now+10ms。
+    // 它已经被取消（>now+5ms 才算"可取消"），但完全排得上。
+    // 若这条线的定义比音频层的 5ms 宽（比如 20ms），这一拍会被 floor 顶掉 ——
+    // 用户听到的就是调延迟时节奏里少了一声，正是设计文档 §5.4 明令禁止的那种。
+    eq(T.resumeIndex(3, [3], 3000, 1100, 90, 500), 3);
+    // 没有说话被取消的分支也一样：第 5 拍在 4100 = now+10ms，不该被跳过
+    eq(T.resumeIndex(5, [], 4090, 1100, 0, 500), 5);
   });
 
   // ─────────── 点与刻度的位置 ───────────
@@ -363,7 +374,7 @@ process.exit(failed === 0 ? 0 : 1);
 - [ ] **Step 3: 运行测试，确认失败**
 
 Run: `node tools/run-tests.js`
-Expected: 20 个用例全部 `FAIL`，错误信息是 `Cannot read properties of undefined (reading 'visualOffsetMs')` 之类（`timing.js` 还不存在），最后一行 `0 passed, 20 failed`。
+Expected: 21 个用例全部 `FAIL`，错误信息是 `Cannot read properties of undefined (reading 'visualOffsetMs')` 之类（`timing.js` 还不存在），最后一行 `0 passed, 21 failed`。
 
 （若报的是"找不到 timing.js"，说明运行器的 `existsSync` 跳过逻辑没生效，回 Step 1 检查。）
 
@@ -386,7 +397,12 @@ Expected: 20 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
   const NEEDLE_SLOTS = 3;      // 同屏最多 2 个（segments/beats = 5/4），留 1 个余量
   const FADE_IN_MS = 170;
   const FADE_OUT_MS = 190;
-  const SAFETY_MS = 20;
+
+  // "这一拍还排得上吗"的分界线，单位毫秒。
+  // 这是全应用唯一的定义：audio.js 的取消判定也用它（CANCEL_CUTOFF_SEC 由它算出）。
+  // 两边阈值一旦漂移，就会出现"被取消了、却又因为够不着下限而被丢掉"的拍 ——
+  // 用户听到的就是调整延迟时节奏里莫名少了一声。
+  const CANCEL_CUTOFF_MS = 5;
 
   function cycleMs(beatMs, beats) { return beatMs * beats; }
   function sweepMs(beatMs, segments) { return beatMs * segments; }
@@ -401,10 +417,10 @@ Expected: 20 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
   // 延迟只移动音频，不动视觉 —— 视觉是那把尺子。
   function audioOffsetMs(n, beatMs, delayMs) { return (n + 1) * beatMs - delayMs; }
 
-  // 满足 audioOffsetMs(n) > (now - origin) + safety 的最小 n，且不早于 0。
-  function firstFutureIndex(nowMs, originMs, delayMs, beatMs, safetyMs) {
-    const safe = (safetyMs === undefined) ? SAFETY_MS : safetyMs;
-    const n = Math.floor((nowMs + safe - originMs + delayMs) / beatMs);
+  // 满足 audioOffsetMs(n) > (now - origin) + cutoff 的最小 n，且不早于 0。
+  function firstFutureIndex(nowMs, originMs, delayMs, beatMs, cutoffMs) {
+    const cutoff = (cutoffMs === undefined) ? CANCEL_CUTOFF_MS : cutoffMs;
+    const n = Math.floor((nowMs + cutoff - originMs + delayMs) / beatMs);
     return n < 0 ? 0 : n;
   }
 
@@ -481,7 +497,7 @@ Expected: 20 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
     NEEDLE_SLOTS: NEEDLE_SLOTS,
     FADE_IN_MS: FADE_IN_MS,
     FADE_OUT_MS: FADE_OUT_MS,
-    SAFETY_MS: SAFETY_MS,
+    CANCEL_CUTOFF_MS: CANCEL_CUTOFF_MS,
     cycleMs: cycleMs,
     sweepMs: sweepMs,
     delayMax: delayMax,
@@ -502,7 +518,7 @@ Expected: 20 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
 - [ ] **Step 5: 运行测试，确认全绿**
 
 Run: `node tools/run-tests.js`
-Expected: 全部 `ok`，最后一行 `20 passed, 0 failed`，退出码 0。
+Expected: 全部 `ok`，最后一行 `21 passed, 0 failed`，退出码 0。
 
 - [ ] **Step 6: 提交**
 
@@ -571,7 +587,7 @@ git commit -m "Add pure timing math with a zero-dependency test runner"
 - [ ] **Step 2: 运行测试，确认失败**
 
 Run: `node tools/run-tests.js`
-Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undefined (reading 'strings')`；原有 20 个仍 `ok`。
+Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undefined (reading 'strings')`；原有 21 个仍 `ok`。
 
 - [ ] **Step 3: 实现 `i18n.js`**
 
@@ -664,7 +680,7 @@ Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undef
 - [ ] **Step 4: 运行测试，确认全绿**
 
 Run: `node tools/run-tests.js`
-Expected: `25 passed, 0 failed`。
+Expected: `26 passed, 0 failed`。
 
 - [ ] **Step 5: 提交**
 
@@ -1052,7 +1068,11 @@ git commit -m "Add page skeleton and styles"
   const ATTACK_SEC = 0.003;
   const DECAY_SEC = 0.012;
   const TAIL_SEC = 0.002;
-  const CANCEL_CUTOFF_SEC = 0.005;   // 早于这个提前量的已排音频认为"已经在播"，不取消
+
+  // "这一拍还排得上 / 还取消得掉吗"的分界线。定义在 timing.js 里，这里只做单位换算，
+  // 刻意不给默认值 —— 两处阈值必须是同一个数，一旦漂移就会静默丢拍。
+  // 顺带：timing.js 没先加载时这里会立刻抛错，比悄悄用一个不一样的值好。
+  const CANCEL_CUTOFF_SEC = SDT.timing.CANCEL_CUTOFF_MS / 1000;
   const PRUNE_AFTER_SEC = 0.2;
 
   let ctx = null;
@@ -1159,7 +1179,7 @@ git commit -m "Add page skeleton and styles"
 `tools/run-tests.js` 的 `APP_SCRIPTS` 里已经包含 `audio.js`，所以这一步顺带验证了它能在裸 vm 里求值。
 
 Run: `node tools/run-tests.js`
-Expected: `25 passed, 0 failed`。
+Expected: `26 passed, 0 failed`。
 
 `audio.js` 顶层只有 `const`/`function` 声明和最后的 `SDT.audio = {...}`，不碰 `document` 也不碰 `AudioContext`；`init()` 不会被调用，所以不会抛异常。
 
@@ -1500,11 +1520,17 @@ git commit -m "Add delay controls with press-and-hold repeat"
   function pump() {
     if (!state.running || state.paused) return;
     const beatMs = state.beatMs;
-    const horizonMs = SDT.audio.currentTime() * 1000 + LOOKAHEAD_MS;
-    while (state.originMs + T.audioOffsetMs(state.nextIndex, beatMs, state.delay) < horizonMs) {
-      const atSec = (state.originMs +
-                     T.audioOffsetMs(state.nextIndex, beatMs, state.delay)) / 1000;
-      SDT.audio.schedule(state.nextIndex, atSec);
+    const nowMs = SDT.audio.currentTime() * 1000;
+    const horizonMs = nowMs + LOOKAHEAD_MS;
+    const floorMs = nowMs + T.CANCEL_CUTOFF_MS;
+
+    for (;;) {
+      const atMs = state.originMs + T.audioOffsetMs(state.nextIndex, beatMs, state.delay);
+      if (atMs >= horizonMs) break;
+      // 主线程卡住时（切到后台，定时器被节流到 ~1s，而音频照常走）补排的拍会落到过去。
+      // Web Audio 对过去的 start 时刻不报错，直接立刻播 —— 听感上是"连着响两声"。
+      // 宁可丢掉这一拍，也不能让它错位炸响。
+      if (atMs > floorMs) SDT.audio.schedule(state.nextIndex, atMs / 1000);
       state.nextIndex++;
     }
     SDT.audio.prune();
@@ -1629,7 +1655,7 @@ git commit -m "Wire up start, pause, language switching and the lookahead schedu
 - [ ] **Step 6: 全流程人工验收**
 
 Run: `node tools/run-tests.js`
-Expected: `25 passed, 0 failed`。
+Expected: `26 passed, 0 failed`。
 
 然后起一个本地静态服务（`file://` 下 `AudioContext` 可用，但用 `http://` 更接近真实环境）：
 
@@ -1739,10 +1765,10 @@ git commit --allow-empty -m "Verify end-to-end manual acceptance checklist"
 - [ ] **Step 2: 验证浏览器与 Node 结果一致**
 
 Run: `node tools/run-tests.js`
-Expected: `25 passed, 0 failed`
+Expected: `26 passed, 0 failed`
 
 打开 `http://localhost:8000/tests.html`（用 Task 7 起的服务）。
-Expected: 页面底部 `25 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
+Expected: 页面底部 `26 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
 
 - [ ] **Step 3: 提交**
 
@@ -1823,7 +1849,7 @@ node tools/run-tests.js
 git status --short
 ```
 
-Expected: `25 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
+Expected: `26 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
 
 - [ ] **Step 4: 提交**
 

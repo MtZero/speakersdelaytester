@@ -91,13 +91,17 @@ audioTime(n) = originTime + t(n) - delay  // 延迟只移动音频
 
 ```
 每 TIMER_MS 轮询一次：
-  while (audioTime(nextIndex) < ctx.currentTime + LOOKAHEAD_MS/1000) {
-      把第 nextIndex 拍排进队列：src.start(audioTime(nextIndex))
+  now = ctx.currentTime
+  while (audioTime(nextIndex) < now + LOOKAHEAD_MS/1000) {
+      if (audioTime(nextIndex) > now + CANCEL_CUTOFF_MS/1000)      // ← 下界，见下
+          src.start(audioTime(nextIndex))
       nextIndex++
   }
 ```
 
 `src.start(t)` 里的 `t` 是 `ctx.currentTime` 时间轴上的绝对时刻，由音频硬件线程负责精确触发，不受主线程卡顿影响。
+
+**那个下界不能省。** 轮询本身可能被拖慢：页面切到后台时，Chrome 会把定时器节流到约 1 秒一次，而音频照常播。等主线程回来，`nextIndex` 可能已经落后好几拍，它们的时刻全在过去。Web Audio 对 `start()` 传入过去的时刻**不报错**，而是立刻播放 —— 结果是连着几声挤在一起炸响。宁可丢掉这几拍，也不能让它们错位发声。
 
 ### 5.4 延迟改变时的即时响应
 
@@ -121,6 +125,8 @@ nextIndex = max(base, floor)
 **暂停后调整延迟必然触发这条路径**：暂停用 `ctx.suspend()`，`ctx.currentTime` 随之冻结，而音频时刻随延迟前移，时间差被拉到最大。实测在 `ctx.currentTime = 3000ms` 时把延迟从 0 拉到 500，第 3 拍的音频时刻会从 3100ms 前移到 2600ms —— 已经过去了 400ms。
 
 这套规则实现在纯函数 `timing.js` 的 `resumeIndex()` 里，有测试覆盖。这是整个调度里最容易出事的一处，所以它不能藏在 `app.js` 的 DOM 胶水里。
+
+**两条分界线必须是同一个数。** 步骤 1 判断"还取消得掉吗"用的是一个 5ms 的阈值，而步骤 3 的 floor 判断"还排得上吗"必须用**同一个**阈值。若 floor 用了更宽的阈值（比如 20ms），就会出现落在这中间的拍被取消了、却又够不着 floor 而被静默丢掉的窗口 —— 用户听到的正是本节开头要避免的那"少了一声"。所以阈值只在一处定义：`timing.js` 的 `CANCEL_CUTOFF_MS`，`audio.js` 从它算出自己那个秒制常量，不各写各的。
 
 这样用户按下按钮的**下一拍**就是新延迟，手感是即时的。
 
