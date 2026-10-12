@@ -908,7 +908,6 @@ git commit -m "Add bilingual string table with language resolution"
   --press: #2f4055;
   --fg: #eaf2fb;
   --fg-dim: #7d8899;
-  --fg-faint: #5b6675;
 
   --dot-size: clamp(26px, 8vw, 38px);
   --tick-h: clamp(16px, 4.6vw, 24px);
@@ -1120,7 +1119,7 @@ body {
   /* 固定宽度并右对齐：否则 9→10、99→100 时数字和 ms 会整体横移，
      长按连发时这种抖动最明显，仪表盘上看着像不稳定 */
   display: inline-block;
-  min-width: 3ch;
+  min-width: 4ch;
   text-align: right;
   font-size: clamp(44px, 14vw, 60px);
   font-weight: 600;
