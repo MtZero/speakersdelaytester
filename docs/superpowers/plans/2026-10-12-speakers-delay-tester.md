@@ -1641,9 +1641,12 @@ Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名�
       const rgb = i === 0 ? WARM : COOL;
       const idle = i === 0 ? IDLE_ALPHA_DI : IDLE_ALPHA;
 
-      // e < 0.01 的短路只省掉"这一个点"的重写。衰减常数 70ms、阈值 0.01，
-      // 意味着一个点每拍有 -70·ln(0.01) ≈ 322ms 处在阈值之上 ——
-      // 整轮里仍约三分之二的帧在重绘。它不是便宜路径，别当性能保障。
+      // e < 0.01 的短路只省掉"这一个点"的重写。单个点每 2000ms 才闪一次，
+      // 而窗口是 -70·ln(0.01) ≈ 322ms —— 对它是 16%，不是"每拍 322/500"。
+      // 四个点错开 500ms、互不重叠，合起来约 64% 的帧仍有某个点在重绘。
+      // 它不是便宜路径，别当性能保障。
+      // 还有：刻度压根没有这道短路，四个刻度每帧都写（值多半与上一帧相同，
+      // 靠引擎自己去做去重，不靠我们）。
       //
       // 判断写 lit[i] !== false 而不是 if (lit[i])：lit 初值是 null，表示"这一帧还没画过"。
       // 用真值判断的话，从没亮过的点会一直挂着 CSS 里的中性灰占位色，
@@ -1676,10 +1679,21 @@ Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名�
     els.delayValue.textContent = String(state.delay);
   }
 
+  let lastTMs = null;
+
   function frame() {
-    const tMs = SDT.audio.currentTime() * 1000 - state.originMs;
-    renderIndicator(tMs);
+    // 先续下一次再渲染：万一渲染抛了错，循环不会就此永久死掉
+    // （Task 7 用 frameStarted 挡住启动路径，一旦死掉就再也起不来了。
+    //  持续报错虽然吵，但对一台仪器来说，比安静地停住好。）
     requestAnimationFrame(frame);
+
+    const tMs = SDT.audio.currentTime() * 1000 - state.originMs;
+    // 渲染是 tMs 的纯函数 —— 延迟只移动音频，而每次 restart 都会重设 originMs，
+    // 所以 tMs 没变时重绘纯属白费。暂停、启动前、音频丢失之后都因此几乎不花代价。
+    // 注意 lastTMs 记在渲染**之后**：渲染抛错时不更新，于是下一帧会再试一次。
+    if (tMs === lastTMs) return;
+    renderIndicator(tMs);
+    lastTMs = tMs;
   }
 
   // 临时启动入口。Task 7 会把它换成启动遮罩。
@@ -1691,6 +1705,11 @@ Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名�
     state.originMs = (SDT.audio.currentTime() + T.startLeadMs(state.beatMs) / 1000) * 1000;
     state.nextIndex = 0;
     state.running = true;
+    // 先把静息状态画上去，再揭开遮罩。否则浏览器会拿 CSS 里的中性灰占位色先画一帧，
+    // 而手机上这一帧可能被同一个任务里的 AudioContext 构造拖到几十毫秒 ——
+    // 看起来就是"点了开始先闪一下灰"。tMs = 0 落在前导段，画出来正好全是静息色、扫描头全隐藏。
+    renderIndicator(0);
+    lastTMs = 0;
     document.getElementById('start-overlay').hidden = true;
     document.getElementById('app').hidden = false;
     requestAnimationFrame(frame);
@@ -1723,8 +1742,8 @@ Expected（对照原型 `page-layout.html`）：
 - 上排 4 个点，第一个更大、暖色；下排一条时间轴，4 个刻度对齐在点的正下方
 - 扫描头从最左端出发，压到第 1 个刻度时第 1 个点同时亮起，往后逐个走
 - 走到最右端（约 2.5s）时，最左边已经同时冒出一个新扫描头 —— 两个并行约 0.5s，旧的淡出、新的接管，**全程没有任何回跳**
-- 点完「开始」后的前 1.1s **完全不可见**：一个点都不闪，扫描头也还没出现（它在 t=0 才开始淡入、同时从 0% 滑向 20%）。然后第一声"滴"、第 1 个点的闪光、扫描头压到第 1 个刻度，三件事同时发生
-- 每个点从第一帧起就显示自己的静息色（第 0 个暖色、其余冷色），**不应停留在 CSS 占位的中性灰**上
+- 点完「开始」后的前 1.1s **什么都不闪，扫描头也不出现**（它在 t=0 才开始淡入、同时从 0% 滑向 20%）。注意这段里四个点和四个刻度是在的、显示各自的静息色 —— 只是没有任何一个闪起来。然后第一声"滴"、第 1 个点的闪光、扫描头压到第 1 个刻度，三件事同时发生
+- 每个点从**揭开遮罩的第一帧**起就显示自己的静息色（第 0 个暖色、其余冷色），**不能先闪一下 CSS 占位的中性灰**
 
 - [ ] **Step 3: 提交**
 
