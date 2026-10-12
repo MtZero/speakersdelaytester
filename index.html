@@ -1,14 +1,80 @@
 <!DOCTYPE html>
-<html lang="en">
+<html lang="zh">
 <head>
-    <meta charset="UTF-8">
-    <title>Speakers Delay Tester</title>
-    <script src="app.js"></script>
-    <link rel="stylesheet" href="app.css">
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<!-- 标签页标题也走 data-i18n：document.querySelectorAll 会遍历到 <head>，
+     所以 app.js 里那句 apply(lang, document) 顺手就把它本地化了，不需要额外代码 -->
+<title data-i18n="app.title">延迟测试</title>
+<link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<!--div class="circle indicator"></div-->
-<h1 id="tts">Touch To Start</h1>
-<h1 id="delay" hidden></h1>
+
+<div id="start-overlay" class="overlay">
+  <div class="overlay-icon">🎧</div>
+  <h1 class="overlay-title" data-i18n="start.title"></h1>
+  <p class="overlay-sub" data-i18n="start.subtitle"></p>
+  <button id="start-btn" class="overlay-btn" type="button" data-i18n="start.button"></button>
+  <p id="start-error" class="overlay-error" hidden></p>
+</div>
+
+<main id="app" class="app" hidden>
+  <header class="topbar">
+    <span class="brand" data-i18n="app.title"></span>
+    <span class="tools">
+      <button id="lang-btn" class="tool" type="button">
+        <span data-lang-tag="zh">中</span><i>/</i><span data-lang-tag="en">EN</span>
+      </button>
+      <button id="pause-btn" class="tool" type="button"></button>
+    </span>
+  </header>
+
+  <div class="indicator">
+    <div class="stage" id="stage">
+      <div class="dot" data-beat="0"></div>
+      <div class="dot" data-beat="1"></div>
+      <div class="dot" data-beat="2"></div>
+      <div class="dot" data-beat="3"></div>
+      <div class="tick" data-beat="0"></div>
+      <div class="tick" data-beat="1"></div>
+      <div class="tick" data-beat="2"></div>
+      <div class="tick" data-beat="3"></div>
+      <div class="track"></div>
+      <div class="needle"></div>
+      <div class="needle"></div>
+      <div class="needle"></div>
+    </div>
+  </div>
+
+  <div class="readout"><span id="delay-value">0</span><em>ms</em></div>
+
+  <div class="buttons">
+    <button class="btn step" type="button" data-step="-10">−10</button>
+    <button class="btn step" type="button" data-step="-1">−1</button>
+    <button class="btn step" type="button" data-step="1">+1</button>
+    <button class="btn step" type="button" data-step="10">+10</button>
+  </div>
+  <div class="buttons sub">
+    <button id="reset-btn" class="btn" type="button" data-i18n="controls.reset"></button>
+  </div>
+
+  <footer class="foot">
+    <p class="foot-hint" data-i18n="hint"></p>
+    <p class="foot-caveat" data-i18n="caveat"></p>
+  </footer>
+</main>
+
+<!-- 预留：节拍间隔由用户调整。当前 hidden，不对用户开放。见设计文档 §4.1 -->
+<div id="interval-slot" hidden>
+  <label>节拍间隔
+    <input id="interval-input" type="number" min="200" max="1000" step="50" value="500">
+  ms</label>
+</div>
+
+<script src="i18n.js"></script>
+<script src="timing.js"></script>
+<script src="audio.js"></script>
+<script src="app.js"></script>
 </body>
 </html>
