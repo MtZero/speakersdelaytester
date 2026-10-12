@@ -15,6 +15,7 @@
       'controls.resume': '继续',
       'hint': '戴上耳机，把“滴嗒嗒哒”调到与闪动的点完全重合',
       'caveat': '读数还包含设备自身的音频与显示延迟（通常 10–40 ms），适合横向比较耳机，不是实验室级绝对值',
+      'error.audioLost': '音频被系统中断，没能自动恢复。点下面的按钮重新开始。',
       'error.noAudio': '当前浏览器不支持 Web Audio，无法运行'
     },
     en: {
@@ -27,6 +28,7 @@
       'controls.resume': 'Resume',
       'hint': 'Wear your headphones and adjust until the beat lines up with the dots',
       'caveat': "Includes your device's own audio and display latency (typically 10–40 ms) — good for comparing headphones, not a lab-grade figure",
+      'error.audioLost': 'Audio was interrupted by the system and could not recover. Tap below to restart.',
       'error.noAudio': 'This browser does not support Web Audio'
     }
   };
