@@ -1911,12 +1911,32 @@ git commit -m "Add delay controls with press-and-hold repeat"
     document.getElementById('start-overlay').hidden = true;
     document.getElementById('app').hidden = false;
     document.getElementById('start-error').hidden = true;
+    // 手势这条路径同样要复查：WebKit 也可能连手势里的 resume() 一起拒绝。
+    // 只在切后台那条路复查的话，这里会静默地把 state.running 置成 true 再撤掉遮罩，
+    // 用户又回到一个冻住的指示器前面 —— 正好是这整套机制要消灭的那种失效。
+    watchForAudioLoss();
     // 只起一次：音频丢失后遮罩会重新出现，用户再点一次 start() 时
     // 不能再叠一个 rAF 循环，否则每帧渲染两遍
     if (!frameStarted) {
       frameStarted = true;
       requestAnimationFrame(frame);
     }
+  }
+
+  // 恢复是异步的，"允许调用"不等于"已经恢复"。隔一会儿复查一次：
+  // 只有 state.paused 还说好、实际已经冻住的情况才需要说话。
+  //
+  // !document.hidden 不能省：没有 navigator.audioSession 的浏览器
+  // （iOS Safari 14/15 就是，在支持范围内）页面隐藏时 ctx 本来就不是 running。
+  // 少了这一条，用户回到页面后 600ms 内又切走，就会看到一条假的"音频已丢失" ——
+  // 在这条专门用来"让用户能信任界面"的路径上，误报的代价尤其高。
+  function watchForAudioLoss() {
+    setTimeout(function () {
+      if (state.running && !state.paused && !document.hidden &&
+          SDT.audio.state() !== 'running') {
+        showAudioLost();
+      }
+    }, 600);
   }
 
   // 音频被系统打断且没能自动恢复。这时 ctx.currentTime 已经冻住，
@@ -1970,14 +1990,10 @@ git commit -m "Add delay controls with press-and-hold repeat"
     // 切回前台时若音频上下文被挂起，恢复它。
     // 因为一切以 ctx.currentTime 为准，不需要做任何重新对齐。
     // 切回前台时恢复音频。因为一切以 ctx.currentTime 为准，恢复本身不需要重新对齐。
-    // 但"允许调用 resume()"不等于"真的恢复了" —— WebKit 在刚被打断之后可能拒绝，
-    // 所以隔一会儿复查一次；那时只有 state.paused 还说好，实际已经冻住了。
     document.addEventListener('visibilitychange', function () {
       if (document.hidden || !state.running || state.paused) return;
       SDT.audio.resume();
-      setTimeout(function () {
-        if (state.running && !state.paused && SDT.audio.state() !== 'running') showAudioLost();
-      }, 600);
+      watchForAudioLoss();
     });
   }
 ```
