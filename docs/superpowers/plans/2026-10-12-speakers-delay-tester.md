@@ -370,6 +370,9 @@ process.exit(failed === 0 ? 0 : 1);
     eq(T.pendingBeats(0, 1590, 1100, 0, 500, 1740).indices.join(','), '0');
     // now=1596 时分界线 1601，第 0 拍已经被判定为过去，丢掉。
     eq(T.pendingBeats(0, 1596, 1100, 0, 500, 1740).indices.join(','), '');
+    // 恰好压线（atMs === now+5）也要丢掉。这里必须和 audio.js 的 cancelPending 用
+    // 同一个严格比较：一个说"还算数"、另一个说"已经过去了"，就会两头都不管这一拍。
+    eq(T.pendingBeats(0, 1595, 1100, 0, 500, 1740).indices.length, 0);
     // 窗口还没够到任何一拍
     const r = T.pendingBeats(0, 1000, 1100, 0, 500, 1120);
     eq(r.indices.length, 0);
