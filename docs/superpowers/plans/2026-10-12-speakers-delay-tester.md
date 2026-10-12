@@ -798,7 +798,8 @@ git commit -m "Add bilingual string table with language resolution"
 
 **Files:**
 - Create: `index.html`（同名，直接覆盖现有的原型）
-- Create: `styles.css`（新文件；现有的 `app.css` 是原型遗留，在 Task 7 里删除）
+- Create: `styles.css`
+- Delete: `app.css`、`app.js`（原型遗留；新实现分别在 Task 5 重建 `app.js`，`app.css` 不再需要）
 
 - [ ] **Step 1: 写 `index.html`**
 
@@ -1134,14 +1135,41 @@ body {
 .foot-caveat { margin: 6px 0 0; font-size: 11px; line-height: 1.6; color: #414c5a; }
 ```
 
-- [ ] **Step 3: 提交**
+- [ ] **Step 3: 删掉原型遗留文件**
+
+旧 `app.js` 在加载时会注册一个点击处理器，而它引用的 `#tts` / `#delay` 在新结构里都不存在 —— 点一下页面就抛异常。它的内容从 Task 5 起被完全重写，所以这里直接删掉。
+
+```bash
+git rm app.css app.js
+```
+
+- [ ] **Step 4: 在浏览器里核对结构**
+
+打开 `index.html`。控制台会报 `audio.js` 和 `app.js` 找不到 —— **这是预期的**，它们分别在 Task 4 和 Task 5 才创建。
+
+此时所有挂着 `data-i18n` 的位置都是**空白**（文案由 JS 写入，而 `app.js` 还没接线）。在控制台跑一句，用真实机制把文案填进去：
+
+```js
+SDT.i18n.apply(SDT.i18n.detect(), document);
+```
+
+Expected（对照已确认的原型 `.superpowers/brainstorm/90265-1791777941/content/page-layout.html`）：
+
+- 顶部一行：标题在左，「中/EN」和暂停按钮在右
+- 指示器是一块深色面板：上排 4 个点（第一个略大）、下排一条轨道带 4 个刻度，**刻度正对在点的下方**
+- 一个很大的 `0 ms`
+- 一排四个按钮 `−10 −1 +1 +10`，下面一行「归零」
+- 底部两行小字（第二行更小更暗）
+- 窄窗口（320px）下不溢出；拉宽到 900px 以上时整列限宽居中，**指示器不会被拉长**
+
+动效和声音都还没有，那是 Task 5 之后的事。这一步只看结构、层级和比例。
+
+- [ ] **Step 5: 提交**
 
 ```bash
 git add index.html styles.css
 git commit -m "Add page skeleton and styles"
 ```
-
-（`app.css` 和旧的 `app.js` 先留着不动。`app.js` 在 Task 5 起被逐步重写成新实现，`app.css` 在 Task 7 里删除。）
 
 ---
 
@@ -1298,7 +1326,7 @@ git commit -m "Add audio engine: tone synthesis and scheduling primitives"
 ## Task 5: 指示器渲染
 
 **Files:**
-- Create: `app.js`（同名，整体替换原型遗留的旧文件）
+- Create: `app.js`
 
 - [ ] **Step 1: 写 `app.js` 的指示器部分**
 
@@ -1610,7 +1638,6 @@ git commit -m "Add delay controls with press-and-hold repeat"
 
 **Files:**
 - Modify: `app.js`
-- Delete: `app.css`、旧的 `app.js` 内容已被整体替换
 
 - [ ] **Step 1: 加前瞻调度器与启动流程**
 
@@ -1745,12 +1772,9 @@ git commit -m "Add delay controls with press-and-hold repeat"
 - [ ] **Step 5: 删除废弃文件并最终提交**
 
 ```bash
-git rm app.css
-git add app.js index.html
+git add app.js
 git commit -m "Wire up start, pause, language switching and the lookahead scheduler"
 ```
-
-`app.js` 是同名替换，`git add` 会记录修改。
 
 - [ ] **Step 6: 全流程人工验收**
 
@@ -1933,8 +1957,10 @@ git commit -m "Add browser self-test page"
 ## 加一门语言
 
 在 `i18n.js` 的 `strings` 里加一个键（比如 `ja`），照 `zh` 把所有键补全。
-`tests.js` 里有一条断言会检查所有语言的键集合一致，加完跑一次测试即可。
-另外把 `resolve()` 里的语言探测规则补上，并在 `app.js` 的「中/EN」切换按钮上接入。
+**不需要改 `resolve()` 或 `t()`** —— 它们以文案表为准，表里有这门语言就认。
+
+`tests.js` 里有一条断言会遍历整张表、检查所有语言的键集合一致，加完跑一次测试即可。
+剩下要动的是纯 UI：`app.js` 里「中/EN」那个二选一按钮，以及 `styles.css` 里对应的高亮规则。
 
 ## 预留但未开放
 

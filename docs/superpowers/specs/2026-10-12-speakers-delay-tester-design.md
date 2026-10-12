@@ -262,7 +262,7 @@ k0 = max(0, floor((t - SWEEP_MS) / CYCLE_MS) + 1)
 - 文案表就是一个对象：`{ zh: {...}, en: {...} }`，**加一门语言 = 加一个键**。
 - DOM 用 `data-i18n="key"` 标注；切换语言时遍历 `[data-i18n]` 写 `textContent`。
 - **标签页标题也挂 `data-i18n`**：`document.querySelectorAll` 会遍历到 `<head>`，所以 `apply(lang, document)` 顺手就把 `<title>` 本地化了，不需要在 `app.js` 里为它写特例。`<html lang>` 则由 `setLang` 单独更新（它不是文案，是语言标记）。
-- 语言解析顺序：`localStorage.sdt.lang` → `navigator.language` 以 `zh` 开头则 `zh`，否则 `en`。localStorage 访问包在 try/catch 里（隐私模式下会抛异常）。
+- 语言解析顺序：`localStorage.sdt.lang` → `navigator.language` 的前两位命中文案表里的语言就用它，否则 `en`。**判断"有没有这门语言"一律以文案表为准，`resolve()` 里不写死任何语言代码** —— 加一门语言不需要回来改逻辑。localStorage 访问包在 try/catch 里（隐私模式下会抛异常）。
 - 顶栏一个「中 / EN」切换按钮。
 
 需要的键：`app.title`、`start.title`、`start.subtitle`、`start.button`、`controls.reset`、`controls.pause`、`controls.resume`、`hint`、`caveat`、`error.noAudio`。
