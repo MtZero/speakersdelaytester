@@ -235,6 +235,56 @@
     eq(r.nextIndex, 0, '什么也没排时 nextIndex 不能前进，否则会漏拍');
   });
 
+  // ─────────── 音频队列记账 ───────────
+  // init() 是调用时才去取 root.AudioContext 的，所以可以先塞一个假的进去，
+  // 驱动真实的 audio.js —— 不需要音频硬件，仍然跑在裸 vm 里。
+  //
+  // 两条限制写清楚，免得后人以为覆盖得比实际多：
+  //   1. 测的是"我们的记账"，不是浏览器语义。stop() 能不能真的掐掉一个已排的声音，
+  //      只有 Task 8 的浏览器自检页能验。
+  //   2. ctx 在 audio.js 里是模块私有且只建一次，所以这组用例拥有本进程唯一那次 init()。
+  run('audio 记账：取消边界与 timing 一致，且只停被取消的', function () {
+    const made = [];
+    function FakeCtx() {
+      this.currentTime = 100;
+      this.sampleRate = 48000;
+      this.state = 'running';
+      this.destination = {};
+      this.createGain = function () { return { gain: { value: 1 }, connect: function () {} }; };
+      this.createBuffer = function (ch, len) {
+        return { getChannelData: function () { return new Float32Array(len); } };
+      };
+      this.createBufferSource = function () {
+        const s = { buffer: null, stops: 0, connect: function () {}, start: function () {}, stop: function () { s.stops++; } };
+        made.push(s);
+        return s;
+      };
+      this.resume = function () { return Promise.resolve(); };
+    }
+
+    const realAC = root.AudioContext;
+    root.AudioContext = FakeCtx;
+    try {
+      const a = SDT.audio;
+      a.init();
+      eq(a.state(), 'running');
+
+      // 分界线是 now + CANCEL_CUTOFF_MS/1000 = 100.005
+      a.schedule(0, 100.005);   // 恰好压线
+      a.schedule(1, 100.004);   // 已经过去（等于正在播）
+      a.schedule(2, 100.006);   // 还排得上
+
+      const cancelled = a.cancelPending();
+      eq(cancelled.join(','), '2',
+         '只有严格大于分界线的才取消 —— 和 timing.js 的 pendingBeats 必须给出同一个判断');
+      eq(made[2].stops, 1, '被取消的停一次');
+      eq(made[0].stops, 0, '恰好压线的不停');
+      eq(made[1].stops, 0, '已在播的不停 —— 不能把正在响的音掐断');
+    } finally {
+      root.AudioContext = realAC;
+    }
+  });
+
   // 这台仪器赖以成立的不变量：扫描头压到第 i 个点的**时刻**，
   // 正好就是第 i 个点闪亮的**时刻**。用户就是靠这个重合去调延迟的。
   // 单函数各自钉死绝对值的那些测试挡不住"约定整体偏移"式的重构，这一条可以。
