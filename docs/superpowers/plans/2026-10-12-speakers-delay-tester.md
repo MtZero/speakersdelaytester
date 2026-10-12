@@ -1830,6 +1830,13 @@ git commit -m "Add indicator rendering driven by the audio clock"
     holdTimer = setTimeout(tick, HOLD_DELAY_MS);   // 按住 380ms 后开始连发
   }
 
+> **一条要守住的隐式不变量（Task 7 注意）：** `aria-live="off"` 只有 `beginHold` 一处会写，
+> 而且它就紧跟在 `holdButton = btn` 之后、同一个同步块里，没有事件能插进来。
+> 所以恒有 **`aria-live === 'off'` ⇒ `holdButton !== null`** —— 这正是 `endHold` 那个早退安全的原因：
+> 任何看到 `holdButton` 非空的 `endHold` 都会走恢复分支。
+> **将来的代码若在别处把 `aria-live` 设成 `off` 而不设 `holdButton`，这条不变量就断了**，
+> 之后随便点一下页面都会把它永久留在 `off`（从"多念一次"变成"永远不念"）。
+
   function wireControls() {
     const buttons = document.querySelectorAll('.btn.step');
     for (const btn of buttons) {
