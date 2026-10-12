@@ -135,7 +135,10 @@
     if (ctx.state === 'running' || ctx.state === 'closed') return;
     try {
       const p = ctx.resume();
-      // WebKit 在刚被打断之后可能拒绝这次恢复；吞掉的话故障又会变成静默的
+      // 这里吞掉拒绝，只是为了不让它变成未处理的 promise rejection ——
+      // 并不是说失败可以不管。允许调用了不等于真的恢复了：WebKit 在刚被打断之后
+      // 有可能拒绝。所以真正的兜底在调用方：Task 7 切回前台时会复查 state()，
+      // 不恢复就把话说出来，而不是让仪器静默地假活。
       if (p && p.catch) p.catch(function () {});
     } catch (e) { /* 某些 WebKit 版本在这里同步抛 */ }
   }
