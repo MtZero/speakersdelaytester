@@ -30,6 +30,8 @@
 
   let els = null;
   let lit = [];          // 每个点上一次是否处于"亮"的状态：null=没画过 / true=亮 / false=暗
+  let timerId = null;    // 调度器轮询句柄
+  let frameStarted = false;   // 见 start()：音频丢失后遮罩会回来，用户再点一次时不能叠第二个 rAF 循环
 
   function rgba(rgb, alpha) {
     return 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + alpha.toFixed(3) + ')';
@@ -159,15 +161,21 @@
     endHold();
   }
 
-  // 这里只管数值：夹取、刷新读数。
-  // 音频那一半（取消已排、重排、pump）属于 Task 7 —— 调度器那时才存在。
-  // 现在就把 pump() 写进去的话，它是个未声明的标识符，一点按钮就 ReferenceError；
-  // 而 renderReadout() 在抛错之前已经执行，表现成"数字会动、别的地方坏了"，很难查。
   function applyDelay(next) {
     const clamped = T.clampDelay(next, T.delayMax(state.beatMs));
     if (clamped === state.delay) return;
     state.delay = clamped;
     renderReadout();
+
+    if (!state.running) return;
+    // 取消已排但还没响的音频，再从"被取消的最小拍号"和"第一个仍在未来的拍号"里取大的那个续排。
+    // 两个约束缺一不可（会多一声 / 会炸响），推导见 timing.js 里 resumeIndex 的注释和设计文档 §5.4。
+    const cancelled = SDT.audio.cancelPending();
+    state.nextIndex = T.resumeIndex(
+      state.nextIndex, cancelled,
+      SDT.audio.currentTime() * 1000, state.originMs, state.delay, state.beatMs
+    );
+    pump();
   }
 
   function beginHold(btn, step, pointerId) {
@@ -199,6 +207,9 @@
       }
 
       btn.addEventListener('pointerdown', function (e) {
+        // 只认主键。右键、中键、笔的橡皮端都会派发 pointerdown；
+        // 不拦的话它们同样会改值并启动连发（Windows 上中键还会同时触发自动滚动）。
+        if (e.button !== 0) return;
         // 鼠标不要 preventDefault：它会连带压掉 mousedown 的默认动作（把焦点交给按钮），
         // 于是点过的按钮不会成为 Tab 的起点。触摸才需要拦，防的是长按选中和双击缩放 ——
         // 而这两件事 CSS 里本来就都覆盖了（.btn 的 user-select、.btn.step 的 touch-action）。
@@ -212,10 +223,12 @@
       // detail === 0 是合成点击（键盘/AT），鼠标和触摸是 1，用它避免一次按压走两步。
       btn.addEventListener('click', function (e) {
         if (e.detail !== 0) return;
+        const before = state.delay;
         applyDelay(state.delay + step);
-        // 已经到边界（0 或 500）时再按就没有变化了，而屏幕阅读器只对变化有反应 ——
-        // 键盘/AT 用户会完全收不到任何反馈。补写一次产生 mutation，把当前值念出来。
-        renderReadout();
+        // 只有"已经到边界、值没变"这一种情况才需要补一次写入。
+        // 正常步进时 applyDelay 已经写过一次，无条件再写就是两次 mutation，
+        // 屏幕阅读器会把同一个值念两遍 —— 恰好和这条修复的意图相反。
+        if (state.delay === before) renderReadout();
       });
     }
     // 释放监听到 window 上：手指滑出按钮再松开也要停。
@@ -233,9 +246,15 @@
     });
 
     // Task 7 会把它改成走 restart()（理由见那里）。现在只改数值。
+    // 归零走 restart() 而不是 applyDelay(0)：延迟一次跳太多时，过渡那一拍的旧音和新音
+    // 可能落在几十毫秒内 —— 两个起音挤在一起，恰好污染了这个应用要测量的那个量。
+    // 重启会先取消所有已排音频并重新起一轮（1.1s 的前导足够任何在响的音收尾），
+    // 顺带"从左边重新开始"也更贴合"归零"的语义。
     document.getElementById('reset-btn').addEventListener('click', function () {
       endHold();
-      applyDelay(0);
+      state.delay = 0;
+      renderReadout();
+      if (state.running) restart();
     });
 
     // 桌面键盘：← → 调 1ms，Shift + ← → 调 10ms
@@ -284,32 +303,174 @@
     renderAndRecord(tMs);
   }
 
-  // 临时启动入口。Task 7 会把它换成启动遮罩。
-  // 现在点页面任意位置即可启动 —— 必须是真实点击：AudioContext 只允许在用户手势里恢复，
-  // 否则上下文一直挂起、currentTime 冻结，指示器根本不会动。
-  function tempStart() {
-    SDT.audio.init();
-    SDT.audio.resume();
+  // 前瞻调度：提前把音频排进 AudioContext 的采样级时间轴。
+  // 绝不能等定时器到点了才发声 —— 移动端 setTimeout 抖动可达几十毫秒，比要测的量级还大。
+  // 排哪些拍的判断全在 T.pendingBeats() 里（纯函数、有测试）；这里只负责把结果交给音频层。
+  function pump() {
+    if (!state.running || state.paused) return;
+    // 时钟冻住时（WebKit 的 interrupted，或页面隐藏）不能继续排：
+    // 那样最多有一拍会落在 120ms 前瞻窗内，而它的时刻是"过去"，
+    // 恢复时会被立刻播放 —— 就是设计里费力避免的"两声挤在一起"。
+    if (SDT.audio.state() !== 'running') return;
+
+    const nowMs = SDT.audio.currentTime() * 1000;
+    const r = T.pendingBeats(state.nextIndex, nowMs, state.originMs, state.delay,
+                             state.beatMs, nowMs + LOOKAHEAD_MS);
+    for (const n of r.indices) {
+      const atMs = state.originMs + T.audioOffsetMs(n, state.beatMs, state.delay);
+      SDT.audio.schedule(n, atMs / 1000);
+    }
+    state.nextIndex = r.nextIndex;
+    SDT.audio.prune();
+  }
+
+  function restart() {
+    SDT.audio.cancelPending();
     state.originMs = (SDT.audio.currentTime() + T.startLeadMs(state.beatMs) / 1000) * 1000;
     state.nextIndex = 0;
+    pump();
+  }
+
+  function start() {
+    // 万一还卡着一次连发就清掉：音频丢失后遮罩会回来，而用户是用另一根手指去点「开始」的，
+    // 那个 pointerId 和连发的不一样，endHoldFromPointer 不会认它。
+    endHold();
+    if (!SDT.audio.isSupported()) {
+      const err = document.getElementById('start-error');
+      err.textContent = I18N.t('error.noAudio', currentLang);
+      err.hidden = false;
+      return;
+    }
+    SDT.audio.init();
+    // start() 一定跑在用户手势里，而手势正是浏览器允许恢复音频的唯一时机 ——
+    // 从"音频被系统打断"里回来就靠这一下（见下面的 showAudioLost）。
+    SDT.audio.resume();
+
     state.running = true;
-    // 先把静息状态画上去，再揭开遮罩。否则浏览器会拿 CSS 里的中性灰占位色先画一帧，
-    // 而手机上这一帧可能被同一个任务里的 AudioContext 构造拖到几十毫秒 ——
-    // 看起来就是"点了开始先闪一下灰"。tMs = 0 落在前导段，画出来正好全是静息色、扫描头全隐藏。
+    state.paused = false;
+    restart();
+
+    if (timerId) clearInterval(timerId);
+    timerId = setInterval(pump, TIMER_MS);
+
+    // 揭开遮罩之前先把静息状态画上去：否则浏览器会拿 CSS 里的中性灰占位色先画一帧，
+    // 而手机上这一帧可能被同一个任务里的 AudioContext 构造拖到几十毫秒。
+    // tMs = 0 落在前导段，画出来全是静息色、扫描头全隐藏，不会误闪。顺序要紧。
     renderAndRecord(0);
     document.getElementById('start-overlay').hidden = true;
     document.getElementById('app').hidden = false;
-    requestAnimationFrame(frame);
+    document.getElementById('start-error').hidden = true;
+
+    // 手势这条路径同样要复查：WebKit 也可能连手势里的 resume() 一起拒绝。
+    // 只在切后台那条路复查的话，这里会静默地把 state.running 置成 true 再撤掉遮罩，
+    // 用户又回到一个冻住的指示器前面 —— 正好是这整套机制要消灭的那种失效。
+    watchForAudioLoss();
+
+    // 只起一次：音频丢失后遮罩会重新出现，用户再点一次 start() 时不能再叠一个 rAF 循环
+    if (!frameStarted) {
+      frameStarted = true;
+      requestAnimationFrame(frame);
+    }
+  }
+
+  // 恢复是异步的，"允许调用"不等于"已经恢复"。隔一会儿复查一次：
+  // 只有 state.paused 还说好、实际已经冻住的情况才需要说话。
+  //
+  // !document.hidden 不能省：没有 navigator.audioSession 的浏览器（iOS Safari 14/15 就是）
+  // 页面隐藏时 ctx 本来就不是 running。少了这一条，用户回到页面后 600ms 内又切走，
+  // 就会看到一条假的"音频已丢失" —— 在这条专门让用户信任界面的路径上，误报代价尤其高。
+  function watchForAudioLoss() {
+    setTimeout(function () {
+      if (state.running && !state.paused && !document.hidden &&
+          SDT.audio.state() !== 'running') {
+        showAudioLost();
+      }
+    }, 600);
+  }
+
+  // 音频被系统打断且没能自动恢复。这时 ctx.currentTime 已经冻住，指示器跟着冻住，
+  // 但界面看着一切正常 —— 用户会对着一个假活的仪器读数。
+  // 与其静默，不如把遮罩放回来：恢复音频需要用户手势，而遮罩正是收集手势的地方。
+  function showAudioLost() {
+    state.running = false;
+    if (timerId) { clearInterval(timerId); timerId = null; }
+    state.paused = false;
+    const err = document.getElementById('start-error');
+    err.textContent = I18N.t('error.audioLost', currentLang);
+    err.hidden = false;
+    document.getElementById('start-overlay').hidden = false;
+    // 指示器循环不用停：时钟冻住后 tMs 不再变化，frame() 的早退会让它几乎不花代价。
+  }
+
+  let currentLang = I18N.FALLBACK;
+
+  function setLang(lang) {
+    currentLang = lang;
+    I18N.apply(lang, document);
+    document.documentElement.lang = lang;
+    document.getElementById('lang-btn').setAttribute('data-lang', lang);
+    // 暂停按钮的文案随运行状态变，交给 data-i18n 会被写死成"暂停"，所以单独刷
+    document.getElementById('pause-btn').textContent =
+      I18N.t(state.paused ? 'controls.resume' : 'controls.pause', lang);
+    I18N.save(lang);
+  }
+
+  function setPaused(paused) {
+    state.paused = paused;
+    if (paused) SDT.audio.suspend(); else SDT.audio.resume();
+    document.getElementById('pause-btn').textContent =
+      I18N.t(paused ? 'controls.resume' : 'controls.pause', currentLang);
+  }
+
+  function wireChrome() {
+    document.getElementById('start-btn').addEventListener('click', start);
+
+    document.getElementById('pause-btn').addEventListener('click', function () {
+      setPaused(!state.paused);
+    });
+
+    document.getElementById('lang-btn').addEventListener('click', function () {
+      setLang(currentLang === 'zh' ? 'en' : 'zh');
+    });
+
+    // 切回前台时恢复音频。因为一切以 ctx.currentTime 为准，恢复本身不需要重新对齐，
+    // 也不需要任何补偿。但"允许调用 resume()"不等于真的恢复了，所以交给复查。
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden || !state.running || state.paused) return;
+      SDT.audio.resume();
+      watchForAudioLoss();
+    });
+  }
+
+  // 预留位：当前隐藏、不开放。但接线是通的，取消 hidden 即可生效。
+  function wireIntervalSlot() {
+    const input = document.getElementById('interval-input');
+    if (!input) return;
+    input.value = String(state.beatMs);
+    input.addEventListener('change', function () {
+      const v = Math.round(Number(input.value));
+      if (!isFinite(v) || v < 200 || v > 1000) {
+        input.value = String(state.beatMs);
+        return;
+      }
+      state.beatMs = v;
+      state.delay = T.clampDelay(state.delay, T.delayMax(v));
+      renderReadout();
+      // frame() 的早退是按"tMs 是否变过"判断的，前提是渲染是 tMs 的纯函数。
+      // 改了 beatMs 之后这个前提不再成立（同样的 tMs 对应不同画面），所以必须让缓存失效。
+      // restart() 会重设 originMs 从而改变 tMs，但那要在 state.running 时才发生 ——
+      // 不运行时就得手动清。
+      lastTMs = null;
+      if (state.running) restart();
+    });
   }
 
   document.addEventListener('DOMContentLoaded', function () {
     collectElements();
     renderReadout();
-    // 遮罩盖在最上层，但点击会冒泡到 document，所以点遮罩也算数
-    document.addEventListener('click', function once() {
-      document.removeEventListener('click', once);
-      tempStart();
-    });
+    wireChrome();
+    wireIntervalSlot();
+    setLang(I18N.detect());
   });
 
   SDT.app = {

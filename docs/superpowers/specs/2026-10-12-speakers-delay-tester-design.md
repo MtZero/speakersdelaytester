@@ -225,11 +225,18 @@ k0 = max(0, floor((t - SWEEP_MS) / CYCLE_MS) + 1)
 实现要点：
 - 用 Pointer Events，同时覆盖鼠标、触摸、手写笔。
 - 释放监听到 `window` 上（不是按钮上），手指滑出按钮再松开也能停。
-- 按钮 `touch-action: manipulation` + `user-select: none`，`pointerdown` 里 `preventDefault()` 阻止长按选中和双击缩放。
+- **释放事件必须绑定到发起连发的那根指针。** 不辨来源的话：一根手指按住 `+10`、另一根手指点一下 `−1` 再抬起，会把 `+10` 的连发一并掐掉 —— 按钮看着还按着却不再响应。
+- **释放事件也可能永远不来**（按住时 Alt+Tab、弹权限框、在窗口外松手）。所以还必须布兜网：`window` 的 `blur` / `pagehide`，以及 `visibilitychange` 转为隐藏。少了它们，连发会一直跑下去，值卡在边界，而且 `aria-live` 停在 `off`，读数从此不再播报 —— 正是这个应用最不该有的那种安静失效。
+- 按钮 `user-select: none`，`.btn.step` 再配 `touch-action: none`；`pointerdown` 里**只对非鼠标**（`pointerType !== 'mouse'`）调 `preventDefault()`。鼠标上没必要拦（上面两条 CSS 已经覆盖），而拦了会连带压掉 `mousedown` 的默认动作 —— 把焦点交给按钮，于是点过的按钮不会成为 Tab 的起点。
+- `pointerdown` 只认主键（`e.button === 0`）：右键、中键、笔的橡皮端都会派发这个事件，不拦的话它们同样会改值并启动连发。
 
 ### 8.3 键盘（桌面）
 
-`←` / `→` = ∓1ms，`Shift + ←/→` = ∓10ms。仅在焦点不在输入框时生效。
+`←` / `→` = ∓1ms，`Shift + ←/→` = ∓10ms。以下情况一律不接管：
+- 带修饰键（`Cmd`/`Ctrl`/`Alt`）—— Safari 里 `Cmd+←` 是"后退"，拦下来会把它变成改延迟值：用户想返回上一页，结果静默改掉了自己的测量
+- 输入法组合中（`isComposing`，此时方向键是在选字）
+- 焦点在 `INPUT` / `TEXTAREA` / `SELECT`，或在可编辑区域里
+- 应用还没开始运行（那时读数藏在隐藏容器里，改了也没有任何反馈）
 
 ### 8.4 边界
 
