@@ -41,6 +41,7 @@ SDT.timing.visualOffsetMs(n, beatMs)           -> number
 SDT.timing.audioOffsetMs(n, beatMs, delayMs)   -> number
 SDT.timing.firstFutureIndex(nowMs, originMs, delayMs, beatMs[, cutoffMs]) -> number
 SDT.timing.resumeIndex(nextIndex, cancelled, nowMs, originMs, delayMs, beatMs) -> number
+SDT.timing.pendingBeats(nextIndex, nowMs, originMs, delayMs, beatMs, horizonMs) -> {indices, nextIndex}
 SDT.timing.clampDelay(v, max)                  -> number
 SDT.timing.dotPosition(i, segments)            -> number   // 0..1
 SDT.timing.beatAgeMs(tMs, i, beatMs, cycle)    -> number
@@ -347,6 +348,34 @@ process.exit(failed === 0 ? 0 : 1);
     close(list[0].position, 0.4, 1e-12);
   });
 
+  // ─────────── 本轮该排哪些拍（调度决策，app.js 的 pump() 全靠它） ───────────
+
+  run('pendingBeats: 只排够得着前瞻窗口的拍', function () {
+    // origin=1100, beatMs=500, delay=0 → 各拍时刻 1600 / 2100 / 2600 / 3100
+    const r = T.pendingBeats(0, 1500, 1100, 0, 500, 1620);
+    eq(r.indices.join(','), '0');
+    eq(r.nextIndex, 1);
+  });
+
+  run('pendingBeats: 主线程被卡住后补排，过时的拍全部丢掉并干净地接回网格', function () {
+    // now=3000，第 0/1/2 拍（1600/2100/2600）已经在过去，只有第 3 拍（3100）还排得上。
+    // 全部排出去的话就是好几声挤在一起炸响。
+    const r = T.pendingBeats(0, 3000, 1100, 0, 500, 3120);
+    eq(r.indices.join(','), '3');
+    eq(r.nextIndex, 4);
+  });
+
+  run('pendingBeats: 阈值两侧 —— 恰好压线的丢掉，晚一点的留下，没有到点的返回空', function () {
+    // 第 0 拍时刻 1600。now=1590 时分界线 1595，排得上。
+    eq(T.pendingBeats(0, 1590, 1100, 0, 500, 1740).indices.join(','), '0');
+    // now=1596 时分界线 1601，第 0 拍已经被判定为过去，丢掉。
+    eq(T.pendingBeats(0, 1596, 1100, 0, 500, 1740).indices.join(','), '');
+    // 窗口还没够到任何一拍
+    const r = T.pendingBeats(0, 1000, 1100, 0, 500, 1120);
+    eq(r.indices.length, 0);
+    eq(r.nextIndex, 0, '什么也没排时 nextIndex 不能前进，否则会漏拍');
+  });
+
   // 这台仪器赖以成立的不变量：扫描头压到第 i 个点的**时刻**，
   // 正好就是第 i 个点闪亮的**时刻**。用户就是靠这个重合去调延迟的。
   // 单函数各自钉死绝对值的那些测试挡不住"约定整体偏移"式的重构，这一条可以。
@@ -374,7 +403,7 @@ process.exit(failed === 0 ? 0 : 1);
 - [ ] **Step 3: 运行测试，确认失败**
 
 Run: `node tools/run-tests.js`
-Expected: 21 个用例全部 `FAIL`，错误信息是 `Cannot read properties of undefined (reading 'visualOffsetMs')` 之类（`timing.js` 还不存在），最后一行 `0 passed, 21 failed`。
+Expected: 24 个用例全部 `FAIL`，错误信息是 `Cannot read properties of undefined (reading 'visualOffsetMs')` 之类（`timing.js` 还不存在），最后一行 `0 passed, 24 failed`。
 
 （若报的是"找不到 timing.js"，说明运行器的 `existsSync` 跳过逻辑没生效，回 Step 1 检查。）
 
@@ -417,10 +446,10 @@ Expected: 21 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
   // 延迟只移动音频，不动视觉 —— 视觉是那把尺子。
   function audioOffsetMs(n, beatMs, delayMs) { return (n + 1) * beatMs - delayMs; }
 
-  // 满足 audioOffsetMs(n) > (now - origin) + cutoff 的最小 n，且不早于 0。
-  function firstFutureIndex(nowMs, originMs, delayMs, beatMs, cutoffMs) {
-    const cutoff = (cutoffMs === undefined) ? CANCEL_CUTOFF_MS : cutoffMs;
-    const n = Math.floor((nowMs + cutoff - originMs + delayMs) / beatMs);
+  // 满足 audioOffsetMs(n) > (now - origin) + CANCEL_CUTOFF_MS 的最小 n，且不早于 0。
+  // 刻意**不**接受阈值参数：这条分界线只能有一处定义，留个参数就等于给"再漂移一次"留了个口子。
+  function firstFutureIndex(nowMs, originMs, delayMs, beatMs) {
+    const n = Math.floor((nowMs + CANCEL_CUTOFF_MS - originMs + delayMs) / beatMs);
     return n < 0 ? 0 : n;
   }
 
@@ -442,6 +471,29 @@ Expected: 21 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
     }
     const floor = firstFutureIndex(nowMs, originMs, delayMs, beatMs);
     return n < floor ? floor : n;
+  }
+
+  // 本轮该把哪些拍排进音频队列，以及排完之后 nextIndex 走到哪。
+  //
+  // 这是整套调度里唯一会"做决定"的地方，所以它必须是纯函数、必须有测试。
+  // app.js 的 pump() 只负责把返回的拍号交给音频层，不再自己判断 ——
+  // 判断逻辑藏在 DOM 胶水里的话，就是这台仪器最要命的一段没有覆盖的代码。
+  //
+  // 两条规则：
+  //   · 够不着 horizonMs 的先不排，留给下一轮（前瞻）。
+  //   · 时刻已经到/已过的拍**直接丢掉**，不排。Web Audio 对过去的 start 时刻不报错，
+  //     直接立刻播 —— 主线程被卡住时补排的拍会让好几声挤在一起炸响。
+  function pendingBeats(nextIndex, nowMs, originMs, delayMs, beatMs, horizonMs) {
+    const floorMs = nowMs + CANCEL_CUTOFF_MS;
+    const indices = [];
+    let n = nextIndex;
+    for (;;) {
+      const atMs = originMs + audioOffsetMs(n, beatMs, delayMs);
+      if (atMs >= horizonMs) break;      // atMs 每轮递增 beatMs > 0，必然终止
+      if (atMs > floorMs) indices.push(n);
+      n++;
+    }
+    return { indices: indices, nextIndex: n };
   }
 
   // Number() 先转一道：调用方可能直接把 input.value（字符串）递进来，
@@ -506,6 +558,7 @@ Expected: 21 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
     audioOffsetMs: audioOffsetMs,
     firstFutureIndex: firstFutureIndex,
     resumeIndex: resumeIndex,
+    pendingBeats: pendingBeats,
     clampDelay: clampDelay,
     dotPosition: dotPosition,
     beatAgeMs: beatAgeMs,
@@ -518,7 +571,7 @@ Expected: 21 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
 - [ ] **Step 5: 运行测试，确认全绿**
 
 Run: `node tools/run-tests.js`
-Expected: 全部 `ok`，最后一行 `21 passed, 0 failed`，退出码 0。
+Expected: 全部 `ok`，最后一行 `24 passed, 0 failed`，退出码 0。
 
 - [ ] **Step 6: 提交**
 
@@ -587,7 +640,7 @@ git commit -m "Add pure timing math with a zero-dependency test runner"
 - [ ] **Step 2: 运行测试，确认失败**
 
 Run: `node tools/run-tests.js`
-Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undefined (reading 'strings')`；原有 21 个仍 `ok`。
+Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undefined (reading 'strings')`；原有 24 个仍 `ok`。
 
 - [ ] **Step 3: 实现 `i18n.js`**
 
@@ -680,7 +733,7 @@ Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undef
 - [ ] **Step 4: 运行测试，确认全绿**
 
 Run: `node tools/run-tests.js`
-Expected: `26 passed, 0 failed`。
+Expected: `29 passed, 0 failed`。
 
 - [ ] **Step 5: 提交**
 
@@ -1179,7 +1232,7 @@ git commit -m "Add page skeleton and styles"
 `tools/run-tests.js` 的 `APP_SCRIPTS` 里已经包含 `audio.js`，所以这一步顺带验证了它能在裸 vm 里求值。
 
 Run: `node tools/run-tests.js`
-Expected: `26 passed, 0 failed`。
+Expected: `29 passed, 0 failed`。
 
 `audio.js` 顶层只有 `const`/`function` 声明和最后的 `SDT.audio = {...}`，不碰 `document` 也不碰 `AudioContext`；`init()` 不会被调用，所以不会抛异常。
 
@@ -1517,22 +1570,19 @@ git commit -m "Add delay controls with press-and-hold repeat"
   // 前瞻调度：提前把音频排进 AudioContext 的采样级时间轴。
   // 绝不能等定时器到点了才发声 —— 移动端 setTimeout 抖动可达几十毫秒，
   // 比我们要测的量级还大。
+  // 排哪些拍的判断全在 T.pendingBeats() 里（纯函数、有测试）。
+  // 这里只负责把结果交给音频层 —— 判断逻辑一旦长出分支，就等于把最要命的代码
+  // 藏进了没有覆盖的 DOM 胶水里。
   function pump() {
     if (!state.running || state.paused) return;
-    const beatMs = state.beatMs;
     const nowMs = SDT.audio.currentTime() * 1000;
-    const horizonMs = nowMs + LOOKAHEAD_MS;
-    const floorMs = nowMs + T.CANCEL_CUTOFF_MS;
-
-    for (;;) {
-      const atMs = state.originMs + T.audioOffsetMs(state.nextIndex, beatMs, state.delay);
-      if (atMs >= horizonMs) break;
-      // 主线程卡住时（切到后台，定时器被节流到 ~1s，而音频照常走）补排的拍会落到过去。
-      // Web Audio 对过去的 start 时刻不报错，直接立刻播 —— 听感上是"连着响两声"。
-      // 宁可丢掉这一拍，也不能让它错位炸响。
-      if (atMs > floorMs) SDT.audio.schedule(state.nextIndex, atMs / 1000);
-      state.nextIndex++;
+    const r = T.pendingBeats(state.nextIndex, nowMs, state.originMs, state.delay,
+                             state.beatMs, nowMs + LOOKAHEAD_MS);
+    for (const n of r.indices) {
+      const atMs = state.originMs + T.audioOffsetMs(n, state.beatMs, state.delay);
+      SDT.audio.schedule(n, atMs / 1000);
     }
+    state.nextIndex = r.nextIndex;
     SDT.audio.prune();
   }
 
@@ -1655,7 +1705,7 @@ git commit -m "Wire up start, pause, language switching and the lookahead schedu
 - [ ] **Step 6: 全流程人工验收**
 
 Run: `node tools/run-tests.js`
-Expected: `26 passed, 0 failed`。
+Expected: `29 passed, 0 failed`。
 
 然后起一个本地静态服务（`file://` 下 `AudioContext` 可用，但用 `http://` 更接近真实环境）：
 
@@ -1670,7 +1720,7 @@ python3 -m http.server 8000
 3. 点"开始"后约 1.1s 静默，然后第一声"滴"响起，同时第 1 个点闪亮
 4. 戴上蓝牙耳机，把延迟调到听觉与闪光重合 —— 这就是测量结果
 5. 暂停 → 声音和动效**同时**冻结；继续 → 从原处接上，不跳变
-6. 切到别的标签页再切回来 → 音画仍然同步（网页保持运行的前提下）
+6. 切到别的标签页再切回来 → 音画仍然同步（网页保持运行的前提下），并且**不会听到一串挤在一起的连响**（后台标签页的定时器被节流到约 1 秒一次，是这条路径最容易暴露的场景）。回来后音频会稀疏一阵再重新对齐到视觉网格上 —— 这是预期行为，不是故障
 7. 点「中/EN」→ 全部文案（含底部两行小字）立即切换，刷新后仍是上次选的语言
 8. 手机 Chrome、iOS Safari 各走一遍上述流程；iOS 上确认静音拨片打开时仍有声
 
@@ -1765,10 +1815,10 @@ git commit --allow-empty -m "Verify end-to-end manual acceptance checklist"
 - [ ] **Step 2: 验证浏览器与 Node 结果一致**
 
 Run: `node tools/run-tests.js`
-Expected: `26 passed, 0 failed`
+Expected: `29 passed, 0 failed`
 
 打开 `http://localhost:8000/tests.html`（用 Task 7 起的服务）。
-Expected: 页面底部 `26 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
+Expected: 页面底部 `29 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
 
 - [ ] **Step 3: 提交**
 
@@ -1849,7 +1899,7 @@ node tools/run-tests.js
 git status --short
 ```
 
-Expected: `26 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
+Expected: `29 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
 
 - [ ] **Step 4: 提交**
 
