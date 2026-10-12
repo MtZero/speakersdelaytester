@@ -660,6 +660,10 @@ git commit -m "Add pure timing math with a zero-dependency test runner"
     eq(SDT.i18n.t('controls.reset', 'zh'), '归零');
     eq(SDT.i18n.t('nope.missing', 'zh'), 'nope.missing');
     eq(SDT.i18n.t('app.title', 'klingon'), 'Latency Test', '未知语言回落到 en');
+    // 原型链上的键不是文案 —— 必须和普通缺键一样回落到键名，
+    // 否则会被塞进 textContent 渲染成一段函数源码
+    eq(SDT.i18n.t('constructor', 'zh'), 'constructor');
+    eq(SDT.i18n.t('toString', 'en'), 'toString');
   });
 ```
 
@@ -708,12 +712,16 @@ Expected: 新增 6 个用例 `FAIL`，错误是 `Cannot read properties of undef
 
   const FALLBACK = 'en';
 
+  // 只认自有属性。文案表和语言表都是普通对象，直接 obj[key] 会穿到原型链上 ——
+  // 'constructor'、'toString' 这种键会取到 Object 的方法而不是"没有这一项"。
+  // 语言维度和键维度都要走这道守卫，只守一边比不守更让人困惑。
+  function hasOwn(obj, key) {
+    return typeof key === 'string' && Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
   // 语言身份以文案表为准，这两个函数里不写死任何语言代码 ——
   // 加一门语言 = 往 strings 里加一条，不需要回来改逻辑。
-  // 顺带避免 strings['constructor'] 这类原型链上的键被当成"有这门语言"。
-  function hasLanguage(code) {
-    return typeof code === 'string' && Object.prototype.hasOwnProperty.call(strings, code);
-  }
+  function hasLanguage(code) { return hasOwn(strings, code); }
 
   // 纯函数：用户选过的优先，其次看浏览器语言的前两位
   function resolve(stored, navLang) {
@@ -725,13 +733,14 @@ Expected: 新增 6 个用例 `FAIL`，错误是 `Cannot read properties of undef
     return FALLBACK;
   }
 
-  // 纯函数：语言不存在时回落到 en；键不存在时回落到键名本身（比 undefined 好排查）
+  // 纯函数：语言不存在时回落到 en；键不存在时回落到键名本身（比 undefined 好排查）。
+  // "不存在"以自有属性为准，所以 t('constructor', 'zh') 会返回 'constructor'，
+  // 而不是把 Object 构造函数塞进 textContent。
   function t(key, lang) {
     const table = hasLanguage(lang) ? strings[lang] : strings[FALLBACK];
-    const value = table[key];
-    if (value !== undefined) return value;
-    const fallback = strings[FALLBACK][key];
-    return fallback !== undefined ? fallback : key;
+    if (hasOwn(table, key)) return table[key];
+    if (hasOwn(strings[FALLBACK], key)) return strings[FALLBACK][key];
+    return key;
   }
 
   function detect() {
@@ -777,6 +786,9 @@ Expected: `30 passed, 0 failed`。
 git add i18n.js tests.js
 git commit -m "Add bilingual string table with language resolution"
 ```
+
+> 注：若本任务是在代码审查之后重跑的补丁轮，提交信息用
+> `Make language identity table-driven; localize the tab title`。
 
 ---
 
