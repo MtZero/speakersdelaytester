@@ -1219,7 +1219,14 @@ Expected（对照已确认的原型 `.superpowers/brainstorm/90265-1791777941/co
 
 动效和声音都还没有，那是 Task 5 之后的事。这一步只看结构、层级和比例。
 
-- [ ] **Step 5: 提交**
+- [ ] **Step 5: 确认没有误伤**
+
+这一步没碰任何 JS，但跑一下确认：
+
+Run: `node tools/run-tests.js`
+Expected: `30 passed, 0 failed`。
+
+- [ ] **Step 6: 提交**
 
 ```bash
 git add index.html styles.css
@@ -1234,8 +1241,54 @@ git commit -m "Add page skeleton and styles"
 
 **Files:**
 - Create: `audio.js`
+- Modify: `tests.js`（在末尾、闭合之前追加两组用例）
 
-- [ ] **Step 1: 写 `audio.js`**
+- [ ] **Step 1: 追加失败的测试**
+
+在 `tests.js` 末尾、`})(typeof window !== 'undefined' ? window : globalThis);` 之前插入：
+
+```js
+  // ─────────── 音色合成 ───────────
+  // renderTone 是纯函数（只吃采样率和参数，返回 Float32Array），所以这些断言
+  // 不需要音频硬件就能跑。"首尾必须归零"这条尤其值得测 —— 否则会爆音，
+  // 而爆音只能靠耳朵发现，正是最容易漏掉的那类缺陷。
+
+  run('audio.renderTone: 首尾精确归零、峰值受控、时长正确', function () {
+    const spec = SDT.audio.TONES.di;
+    const sr = 48000;
+    const data = SDT.audio.renderTone(spec, sr);
+
+    eq(data.length, Math.round(sr * spec.ms / 1000), '时长');
+    eq(data[0], 0, '第一个样本必须精确为 0');
+    eq(data[data.length - 1], 0, '最后一个样本必须精确为 0');
+
+    let peak = 0, peakAt = 0;
+    for (let i = 0; i < data.length; i++) {
+      const a = Math.abs(data[i]);
+      if (a > peak) { peak = a; peakAt = i; }
+    }
+    eq(peak <= spec.gain + 1e-6, true, '峰值不应超过设定增益，实际 ' + peak.toFixed(4));
+    eq(peak > spec.gain * 0.6, true, '峰值也不该远低于设定增益，实际 ' + peak.toFixed(4));
+    eq(peakAt / sr <= 0.005, true,
+       '峰值应落在起音后 5ms 内，实际 ' + (peakAt / sr * 1000).toFixed(2) + 'ms —— ' +
+       '延迟测试靠的是这个瞬态，起音拖长了听感上的"时刻"就会往后飘');
+  });
+
+  run('audio: 滴比嗒频率高，且四个音等长', function () {
+    eq(SDT.audio.TONES.di.freq > SDT.audio.TONES.da.freq, true, '滴必须比嗒高，否则听不出"滴嗒嗒哒"');
+    eq(SDT.audio.TONES.di.freq, 1600);
+    eq(SDT.audio.TONES.da.freq, 1100);
+    eq(SDT.audio.TONES.di.ms, SDT.audio.TONES.da.ms, '等长，节奏才均匀');
+    eq(SDT.audio.TONES.di.ms, 50);
+  });
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `node tools/run-tests.js`
+Expected: 新增 2 个用例 `FAIL`，错误是 `Cannot read properties of undefined (reading 'TONES')`；原有 30 个仍 `ok`；最后一行 `30 passed, 2 failed`，退出码 1。
+
+- [ ] **Step 3: 写 `audio.js`**
 
 ```js
 (function (root) {
@@ -1270,20 +1323,28 @@ git commit -m "Add page skeleton and styles"
     return !!(root.AudioContext || root.webkitAudioContext);
   }
 
-  function renderTone(spec) {
-    const sr = ctx.sampleRate;
-    const n = Math.max(2, Math.round(sr * spec.ms / 1000));
-    const buf = ctx.createBuffer(1, n, sr);
-    const data = buf.getChannelData(0);
-    const attack = Math.max(1, Math.round(sr * ATTACK_SEC));
-    const tail = Math.max(1, Math.round(sr * TAIL_SEC));
-    const decay = sr * DECAY_SEC;
+  // 纯计算：只吃采样率和音色参数，返回 Float32Array，不碰 AudioContext。
+  // 抽成纯函数是为了能测 —— "首尾必须归零、不然会爆音"这条要求
+  // 否则只能靠耳朵听，而爆音恰恰是最容易漏掉的那种缺陷。
+  function renderTone(spec, sampleRate) {
+    const n = Math.max(2, Math.round(sampleRate * spec.ms / 1000));
+    const data = new Float32Array(n);
+    const attack = Math.max(1, Math.round(sampleRate * ATTACK_SEC));
+    const tail = Math.max(2, Math.round(sampleRate * TAIL_SEC));   // >=2，否则下面的 (tail-1) 除零
+    const decay = sampleRate * DECAY_SEC;
 
     for (let i = 0; i < n; i++) {
       let env = Math.min(1, i / attack) * Math.exp(-i / decay);
-      if (i > n - tail) env *= (n - i) / tail;   // 末端线性归零，杜绝爆音
-      data[i] = Math.sin(2 * Math.PI * spec.freq * i / sr) * env * spec.gain;
+      // 端点包含式淡出：i = n-1 时正好是 0，不留下 1/tail 的残值
+      if (i > n - tail) env *= (n - 1 - i) / (tail - 1);
+      data[i] = Math.sin(2 * Math.PI * spec.freq * i / sampleRate) * env * spec.gain;
     }
+    return data;
+  }
+
+  function toBuffer(samples) {
+    const buf = ctx.createBuffer(1, samples.length, ctx.sampleRate);
+    buf.getChannelData(0).set(samples);
     return buf;
   }
 
@@ -1302,8 +1363,8 @@ git commit -m "Add page skeleton and styles"
     master.gain.value = 1;
     master.connect(ctx.destination);
 
-    buffers.di = renderTone(TONES.di);
-    buffers.da = renderTone(TONES.da);
+    buffers.di = toBuffer(renderTone(TONES.di, ctx.sampleRate));
+    buffers.da = toBuffer(renderTone(TONES.da, ctx.sampleRate));
     return ctx;
   }
 
@@ -1350,6 +1411,7 @@ git commit -m "Add page skeleton and styles"
     init: init,
     currentTime: currentTime,
     state: state,
+    renderTone: renderTone,
     schedule: schedule,
     cancelPending: cancelPending,
     prune: prune,
@@ -1360,20 +1422,20 @@ git commit -m "Add page skeleton and styles"
 })(typeof window !== 'undefined' ? window : globalThis);
 ```
 
-- [ ] **Step 2: 确认没有打破已有的测试**
+- [ ] **Step 4: 运行测试，确认全绿**
+
+Run: `node tools/run-tests.js`
+Expected: 32 × `  ok  <name>`，最后一行 `32 passed, 0 failed`，退出码 0。
 
 `tools/run-tests.js` 的 `APP_SCRIPTS` 里已经包含 `audio.js`，所以这一步顺带验证了它能在裸 vm 里求值。
 
-Run: `node tools/run-tests.js`
-Expected: `30 passed, 0 failed`。
-
 `audio.js` 顶层只有 `const`/`function` 声明和最后的 `SDT.audio = {...}`，不碰 `document` 也不碰 `AudioContext`；`init()` 不会被调用，所以不会抛异常。
 
-- [ ] **Step 3: 提交**
+- [ ] **Step 5: 提交**
 
 ```bash
-git add audio.js
-git commit -m "Add audio engine: tone synthesis and scheduling primitives"
+git add audio.js tests.js
+git commit -m "Add audio engine with a testable tone synthesiser"
 ```
 
 ---
@@ -1844,7 +1906,7 @@ git commit -m "Wire up start, pause, language switching and the lookahead schedu
 - [ ] **Step 6: 全流程人工验收**
 
 Run: `node tools/run-tests.js`
-Expected: `30 passed, 0 failed`。
+Expected: `32 passed, 0 failed`。
 
 然后起一个本地静态服务（`file://` 下 `AudioContext` 可用，但用 `http://` 更接近真实环境）：
 
@@ -1954,10 +2016,10 @@ git commit --allow-empty -m "Verify end-to-end manual acceptance checklist"
 - [ ] **Step 2: 验证浏览器与 Node 结果一致**
 
 Run: `node tools/run-tests.js`
-Expected: `30 passed, 0 failed`
+Expected: `32 passed, 0 failed`
 
 打开 `http://localhost:8000/tests.html`（用 Task 7 起的服务）。
-Expected: 页面底部 `30 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
+Expected: 页面底部 `32 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
 
 - [ ] **Step 3: 提交**
 
@@ -2040,7 +2102,7 @@ node tools/run-tests.js
 git status --short
 ```
 
-Expected: `30 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
+Expected: `32 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
 
 - [ ] **Step 4: 提交**
 
