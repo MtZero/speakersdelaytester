@@ -78,15 +78,15 @@
     const n = T.firstFutureIndex(nowMs, originMs, delayMs, beatMs);
     const at = function (k) { return originMs + T.audioOffsetMs(k, beatMs, delayMs); };
     eq(n, 18);
-    eq(at(n) > nowMs + T.SAFETY_MS, true, '第 n 拍应在安全线之后');
-    eq(at(n - 1) > nowMs + T.SAFETY_MS, false, '第 n-1 拍不应在安全线之后');
+    eq(at(n) > nowMs + T.CANCEL_CUTOFF_MS, true, '第 n 拍应在这条线之后');
+    eq(at(n - 1) > nowMs + T.CANCEL_CUTOFF_MS, false, '第 n-1 拍不应在这条线之后');
   });
 
   run('firstFutureIndex: 边界处不会提前半拍', function () {
     // 第 18 拍的音频时刻 = 1100 + (19*500 - 200) = 10400。
-    // 安全线是 now+20，所以 now < 10380 时第 18 拍还排得上，到 10380 就必须换成第 19 拍。
-    eq(T.firstFutureIndex(10379, 1100, 200, 500), 18);
-    eq(T.firstFutureIndex(10380, 1100, 200, 500), 19);
+    // 分界线是 now+5，所以 now < 10395 时第 18 拍还排得上，到 10395 就必须换成第 19 拍。
+    eq(T.firstFutureIndex(10394, 1100, 200, 500), 18);
+    eq(T.firstFutureIndex(10395, 1100, 200, 500), 19);
   });
 
   run('resumeIndex: 什么都没有被取消时，不回退到更小的拍号', function () {
@@ -109,6 +109,16 @@
     eq(T.resumeIndex(3, [3], 3000, 1100, 500, 500), 4);
     // 对照：同样的取消集合，不改延迟时第 3 拍仍在未来，就该从第 3 拍续
     eq(T.resumeIndex(3, [3], 3000, 1100, 0, 500), 3);
+  });
+
+  run('resumeIndex: 仍在未来的拍不能被丢掉 —— 分界线必须和音频层一致', function () {
+    // 第 3 拍改延迟后落在 1100+2000-90 = 3010，也就是 now+10ms。
+    // 它已经被取消（>now+5ms 才算"可取消"），但完全排得上。
+    // 若这条线的定义比音频层的 5ms 宽（比如 20ms），这一拍会被 floor 顶掉 ——
+    // 用户听到的就是调延迟时节奏里少了一声，正是设计文档 §5.4 明令禁止的那种。
+    eq(T.resumeIndex(3, [3], 3000, 1100, 90, 500), 3);
+    // 没有说话被取消的分支也一样：第 5 拍在 4100 = now+10ms，不该被跳过
+    eq(T.resumeIndex(5, [], 4090, 1100, 0, 500), 5);
   });
 
   // ─────────── 点与刻度的位置 ───────────

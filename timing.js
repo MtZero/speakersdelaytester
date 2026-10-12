@@ -14,7 +14,12 @@
   const NEEDLE_SLOTS = 3;      // 同屏最多 2 个（segments/beats = 5/4），留 1 个余量
   const FADE_IN_MS = 170;
   const FADE_OUT_MS = 190;
-  const SAFETY_MS = 20;
+
+  // "这一拍还排得上吗"的分界线，单位毫秒。
+  // 这是全应用唯一的定义：audio.js 的取消判定也用它（CANCEL_CUTOFF_SEC 由它算出）。
+  // 两边阈值一旦漂移，就会出现"被取消了、却又因为够不着下限而被丢掉"的拍 ——
+  // 用户听到的就是调整延迟时节奏里莫名少了一声。
+  const CANCEL_CUTOFF_MS = 5;
 
   function cycleMs(beatMs, beats) { return beatMs * beats; }
   function sweepMs(beatMs, segments) { return beatMs * segments; }
@@ -29,10 +34,10 @@
   // 延迟只移动音频，不动视觉 —— 视觉是那把尺子。
   function audioOffsetMs(n, beatMs, delayMs) { return (n + 1) * beatMs - delayMs; }
 
-  // 满足 audioOffsetMs(n) > (now - origin) + safety 的最小 n，且不早于 0。
-  function firstFutureIndex(nowMs, originMs, delayMs, beatMs, safetyMs) {
-    const safe = (safetyMs === undefined) ? SAFETY_MS : safetyMs;
-    const n = Math.floor((nowMs + safe - originMs + delayMs) / beatMs);
+  // 满足 audioOffsetMs(n) > (now - origin) + cutoff 的最小 n，且不早于 0。
+  function firstFutureIndex(nowMs, originMs, delayMs, beatMs, cutoffMs) {
+    const cutoff = (cutoffMs === undefined) ? CANCEL_CUTOFF_MS : cutoffMs;
+    const n = Math.floor((nowMs + cutoff - originMs + delayMs) / beatMs);
     return n < 0 ? 0 : n;
   }
 
@@ -109,7 +114,7 @@
     NEEDLE_SLOTS: NEEDLE_SLOTS,
     FADE_IN_MS: FADE_IN_MS,
     FADE_OUT_MS: FADE_OUT_MS,
-    SAFETY_MS: SAFETY_MS,
+    CANCEL_CUTOFF_MS: CANCEL_CUTOFF_MS,
     cycleMs: cycleMs,
     sweepMs: sweepMs,
     delayMax: delayMax,
