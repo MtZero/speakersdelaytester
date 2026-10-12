@@ -12,7 +12,7 @@
 <body>
 
 <div id="start-overlay" class="overlay">
-  <div class="overlay-icon">🎧</div>
+  <div class="overlay-icon" aria-hidden="true">🎧</div>
   <h1 class="overlay-title" data-i18n="start.title"></h1>
   <p class="overlay-sub" data-i18n="start.subtitle"></p>
   <button id="start-btn" class="overlay-btn" type="button" data-i18n="start.button"></button>
@@ -30,7 +30,7 @@
     </span>
   </header>
 
-  <div class="indicator">
+  <div class="indicator" aria-hidden="true">
     <div class="stage" id="stage">
       <div class="dot" data-beat="0"></div>
       <div class="dot" data-beat="1"></div>
@@ -47,7 +47,7 @@
     </div>
   </div>
 
-  <div class="readout"><span id="delay-value">0</span><em>ms</em></div>
+  <div class="readout" aria-live="polite"><span id="delay-value">0</span><span class="unit">ms</span></div>
 
   <div class="buttons">
     <button class="btn step" type="button" data-step="-10">−10</button>
@@ -71,6 +71,13 @@
     <input id="interval-input" type="number" min="200" max="1000" step="50" value="500">
   ms</label>
 </div>
+
+<noscript>
+  <p style="padding:24px;text-align:center;color:#7d8899;font-size:14px;line-height:1.7">
+    这个页面需要 JavaScript 才能发声和计时。<br>
+    This page needs JavaScript to produce sound and keep time.
+  </p>
+</noscript>
 
 <script src="i18n.js"></script>
 <script src="timing.js"></script>
