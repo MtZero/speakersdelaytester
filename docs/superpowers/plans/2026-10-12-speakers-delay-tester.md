@@ -1969,6 +1969,9 @@ git commit -m "Add delay controls with press-and-hold repeat"
     pump();
   }
 
+  // 注意：这里的 renderIndicator(0) 和 lastTMs = 0 是一对，来自 Task 5 的 tempStart()。
+  // 换成 start() 时要一起保留（或一起删掉），否则揭开遮罩那一下会闪一帧 CSS 占位灰，
+  // 或者 lastTMs 和实际画面对不上。
   function start() {
     if (!SDT.audio.isSupported()) {
       const err = document.getElementById('start-error');
@@ -2092,6 +2095,11 @@ git commit -m "Add delay controls with press-and-hold repeat"
       state.beatMs = v;
       state.delay = T.clampDelay(state.delay, T.delayMax(v));
       renderReadout();
+      // frame() 的早退是按"tMs 是否变过"判断的，前提是渲染是 tMs 的纯函数。
+      // 改了 beatMs 之后这个前提就不再成立（同样的 tMs 对应不同画面），
+      // 所以必须让缓存失效；restart() 会重设 originMs 从而改变 tMs，
+      // 但那是在 state.running 时才会发生 —— 不运行时就得手动清。
+      lastTMs = null;
       if (state.running) restart();
     });
   }
