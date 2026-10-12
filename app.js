@@ -129,6 +129,14 @@
 
   let lastTMs = null;
 
+  // 渲染并记录 tMs。顺序是有意的：**渲染成功之后**才记录 ——
+  // 渲染抛错时 lastTMs 保持旧值，下一帧会重试，而不是默默接受一次失败的渲染。
+  // 抽成函数是为了让这个顺序只有一处定义，将来改动不会只改到一半的调用点。
+  function renderAndRecord(tMs) {
+    renderIndicator(tMs);
+    lastTMs = tMs;
+  }
+
   function frame() {
     // 先续下一次再渲染：万一渲染抛了错，循环不会就此永久死掉
     // （Task 7 用 frameStarted 挡住启动路径，一旦死掉就再也起不来了。
@@ -140,8 +148,7 @@
     // 所以 tMs 没变时重绘纯属白费。暂停、启动前、音频丢失之后都因此几乎不花代价。
     // 注意 lastTMs 记在渲染**之后**：渲染抛错时不更新，于是下一帧会再试一次。
     if (tMs === lastTMs) return;
-    renderIndicator(tMs);
-    lastTMs = tMs;
+    renderAndRecord(tMs);
   }
 
   // 临时启动入口。Task 7 会把它换成启动遮罩。
@@ -156,8 +163,7 @@
     // 先把静息状态画上去，再揭开遮罩。否则浏览器会拿 CSS 里的中性灰占位色先画一帧，
     // 而手机上这一帧可能被同一个任务里的 AudioContext 构造拖到几十毫秒 ——
     // 看起来就是"点了开始先闪一下灰"。tMs = 0 落在前导段，画出来正好全是静息色、扫描头全隐藏。
-    renderIndicator(0);
-    lastTMs = 0;
+    renderAndRecord(0);
     document.getElementById('start-overlay').hidden = true;
     document.getElementById('app').hidden = false;
     requestAnimationFrame(frame);
@@ -175,7 +181,11 @@
 
   SDT.app = {
     state: state,
-    renderIndicator: renderIndicator,
+    // 包一层：直接暴露 renderIndicator 的话，外部探针调用会绕过 lastTMs 的记账 ——
+    // 时钟冻住时循环会以为"没变过"而跳过，面板就停在探针画的那个状态，直到时钟再动。
+    renderIndicator: function (t) {
+      renderAndRecord(t);
+    },
     renderReadout: renderReadout
   };
 
