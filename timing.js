@@ -34,10 +34,10 @@
   // 延迟只移动音频，不动视觉 —— 视觉是那把尺子。
   function audioOffsetMs(n, beatMs, delayMs) { return (n + 1) * beatMs - delayMs; }
 
-  // 满足 audioOffsetMs(n) > (now - origin) + cutoff 的最小 n，且不早于 0。
-  function firstFutureIndex(nowMs, originMs, delayMs, beatMs, cutoffMs) {
-    const cutoff = (cutoffMs === undefined) ? CANCEL_CUTOFF_MS : cutoffMs;
-    const n = Math.floor((nowMs + cutoff - originMs + delayMs) / beatMs);
+  // 满足 audioOffsetMs(n) > (now - origin) + CANCEL_CUTOFF_MS 的最小 n，且不早于 0。
+  // 刻意**不**接受阈值参数：这条分界线只能有一处定义，留个参数就等于给"再漂移一次"留了个口子。
+  function firstFutureIndex(nowMs, originMs, delayMs, beatMs) {
+    const n = Math.floor((nowMs + CANCEL_CUTOFF_MS - originMs + delayMs) / beatMs);
     return n < 0 ? 0 : n;
   }
 
@@ -59,6 +59,29 @@
     }
     const floor = firstFutureIndex(nowMs, originMs, delayMs, beatMs);
     return n < floor ? floor : n;
+  }
+
+  // 本轮该把哪些拍排进音频队列，以及排完之后 nextIndex 走到哪。
+  //
+  // 这是整套调度里唯一会"做决定"的地方，所以它必须是纯函数、必须有测试。
+  // app.js 的 pump() 只负责把返回的拍号交给音频层，不再自己判断 ——
+  // 判断逻辑藏在 DOM 胶水里的话，就是这台仪器最要命的一段没有覆盖的代码。
+  //
+  // 两条规则：
+  //   · 够不着 horizonMs 的先不排，留给下一轮（前瞻）。
+  //   · 时刻已经到/已过的拍**直接丢掉**，不排。Web Audio 对过去的 start 时刻不报错，
+  //     直接立刻播 —— 主线程被卡住时补排的拍会让好几声挤在一起炸响。
+  function pendingBeats(nextIndex, nowMs, originMs, delayMs, beatMs, horizonMs) {
+    const floorMs = nowMs + CANCEL_CUTOFF_MS;
+    const indices = [];
+    let n = nextIndex;
+    for (;;) {
+      const atMs = originMs + audioOffsetMs(n, beatMs, delayMs);
+      if (atMs >= horizonMs) break;      // atMs 每轮递增 beatMs > 0，必然终止
+      if (atMs > floorMs) indices.push(n);
+      n++;
+    }
+    return { indices: indices, nextIndex: n };
   }
 
   // Number() 先转一道：调用方可能直接把 input.value（字符串）递进来，
@@ -123,6 +146,7 @@
     audioOffsetMs: audioOffsetMs,
     firstFutureIndex: firstFutureIndex,
     resumeIndex: resumeIndex,
+    pendingBeats: pendingBeats,
     clampDelay: clampDelay,
     dotPosition: dotPosition,
     beatAgeMs: beatAgeMs,

@@ -204,6 +204,34 @@
     close(list[0].position, 0.4, 1e-12);
   });
 
+  // ─────────── 本轮该排哪些拍（调度决策，app.js 的 pump() 全靠它） ───────────
+
+  run('pendingBeats: 只排够得着前瞻窗口的拍', function () {
+    // origin=1100, beatMs=500, delay=0 → 各拍时刻 1600 / 2100 / 2600 / 3100
+    const r = T.pendingBeats(0, 1500, 1100, 0, 500, 1620);
+    eq(r.indices.join(','), '0');
+    eq(r.nextIndex, 1);
+  });
+
+  run('pendingBeats: 主线程被卡住后补排，过时的拍全部丢掉并干净地接回网格', function () {
+    // now=3000，第 0/1/2 拍（1600/2100/2600）已经在过去，只有第 3 拍（3100）还排得上。
+    // 全部排出去的话就是好几声挤在一起炸响。
+    const r = T.pendingBeats(0, 3000, 1100, 0, 500, 3120);
+    eq(r.indices.join(','), '3');
+    eq(r.nextIndex, 4);
+  });
+
+  run('pendingBeats: 阈值两侧 —— 恰好压线的丢掉，晚一点的留下，没有到点的返回空', function () {
+    // 第 0 拍时刻 1600。now=1590 时分界线 1595，排得上。
+    eq(T.pendingBeats(0, 1590, 1100, 0, 500, 1740).indices.join(','), '0');
+    // now=1596 时分界线 1601，第 0 拍已经被判定为过去，丢掉。
+    eq(T.pendingBeats(0, 1596, 1100, 0, 500, 1740).indices.join(','), '');
+    // 窗口还没够到任何一拍
+    const r = T.pendingBeats(0, 1000, 1100, 0, 500, 1120);
+    eq(r.indices.length, 0);
+    eq(r.nextIndex, 0, '什么也没排时 nextIndex 不能前进，否则会漏拍');
+  });
+
   // 这台仪器赖以成立的不变量：扫描头压到第 i 个点的**时刻**，
   // 正好就是第 i 个点闪亮的**时刻**。用户就是靠这个重合去调延迟的。
   // 单函数各自钉死绝对值的那些测试挡不住"约定整体偏移"式的重构，这一条可以。
