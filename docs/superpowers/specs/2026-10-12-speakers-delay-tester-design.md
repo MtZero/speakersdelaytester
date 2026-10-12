@@ -99,12 +99,19 @@ audioTime(n) = originTime + t(n) - delay  // 延迟只移动音频
 已排进队列的音频无法改期，所以改延迟时要：
 
 1. 取消所有**尚未开始播放**的已排音频（`audioTime > ctx.currentTime + 0.005` 的，调用 `src.stop()`；已经开始播的不动 —— 音长只有 50ms，让它自然结束，避免爆音）。
-2. 重算下一个待排拍号：
+2. 把被取消的那些拍号记下来，**从其中最小的那个重新排起**。
+3. 若一个都没取消（全部已经在播），则 `nextIndex` 保持不变。
 
 ```
-X = (ctx.currentTime + SAFETY - originTime + delay) / BEAT
-nextIndex = max(0, floor(X))        // SAFETY = 0.02 秒
+取消的拍号集合 cancelled
+nextIndex = cancelled 非空 ? min(cancelled) : nextIndex
 ```
+
+**为什么不是简单地重算 `nextIndex`：** 一个天真的做法是直接令 `nextIndex = 满足 audioTime(n) > now + SAFETY 的最小 n`。但调小延迟会让整条音频流往后挪，这个最小值可能比"已经播过的拍号"还小 —— 那样同一拍会被排第二次，用户听到一声多余的"嘀"。
+
+反过来，若只让 `nextIndex` 单调递增、绝不回退，则被取消掉的那一拍会永久缺失，调整过程中会漏掉一声。
+
+**从被取消的最小拍号续排**同时避开这两个坑：被取消的拍一定是"排过但还没响"的，重排它们既不重复也不遗漏，且都满足"时间在未来"。
 
 这样用户按下按钮的**下一拍**就是新延迟，手感是即时的。
 

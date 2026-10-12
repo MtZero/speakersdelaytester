@@ -1,0 +1,1754 @@
+# 无线耳机延迟测试器 — 实现计划
+
+> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+
+**Goal:** 用纯静态网页测出蓝牙耳机的音频延迟 —— 页面按固定节奏播放"滴嗒嗒哒"，用户调整提前量直到听觉与视觉指示器重合。
+
+**Architecture:** 以 `AudioContext.currentTime` 为唯一主时钟，音频用前瞻调度器排进音频硬件的采样级时间轴，视觉指示器用 `requestAnimationFrame` 读同一个时钟渲染。所有不碰 DOM 和音频硬件的计时数学抽到一个纯函数模块里，这样它既能在浏览器里测、也能在 Node 里测。
+
+**Tech Stack:** 原生 HTML/CSS/JavaScript，无框架、无构建工具、无外部依赖。测试用一个零依赖的断言文件，通过 Node 的 `vm` 模块在终端里跑，同一个文件也供浏览器自检页使用。
+
+**设计文档:** `docs/superpowers/specs/2026-10-12-speakers-delay-tester-design.md`
+
+**与设计文档的两处差异（有意为之）：**
+1. 新增 `timing.js`（纯计时数学）。设计文档 §3 原列 5 个文件，把计时数学放在 `app.js` 里。抽出来是为了让 §12 要求的那批测试能在 Node 里真正跑起来 —— 跑不了的测试等于没有测试。
+2. 开发期的 Node 测试运行器放在 `tools/`，不参与部署。它用的是 Node 内置模块，不属于"外部库"。
+
+---
+
+## 文件结构
+
+| 文件 | 职责 | 是否部署 |
+|---|---|---|
+| `index.html` | 只有结构，无逻辑 | ✅ |
+| `styles.css` | 全部样式与响应式 | ✅ |
+| `i18n.js` | 文案表、`resolve()`、`t()`、`apply()` | ✅ |
+| `timing.js` | 纯计时数学，不碰 DOM / AudioContext | ✅ |
+| `audio.js` | AudioContext 生命周期、音色合成、前瞻调度器 | ✅ |
+| `app.js` | 拍时钟、指示器渲染、控件接线、总装 | ✅ |
+| `tests.html` | 浏览器自检页 | ✅ |
+| `tests.js` | 断言，浏览器与 Node 共用 | ✅ |
+| `tools/run-tests.js` | Node 运行器 | ❌ 开发用 |
+
+各文件对外接口（全部挂在 `window.SDT` 上）：
+
+```
+SDT.timing.cycleMs(beatMs, beats)              -> number
+SDT.timing.sweepMs(beatMs, segments)           -> number
+SDT.timing.delayMax(beatMs)                    -> number
+SDT.timing.startLeadMs(beatMs)                 -> number
+SDT.timing.visualOffsetMs(n, beatMs)           -> number
+SDT.timing.audioOffsetMs(n, beatMs, delayMs)   -> number
+SDT.timing.firstFutureIndex(nowMs, originMs, delayMs, beatMs[, safetyMs]) -> number
+SDT.timing.clampDelay(v, max)                  -> number
+SDT.timing.dotPosition(i, segments)            -> number   // 0..1
+SDT.timing.beatAgeMs(tMs, i, beatMs, cycle)    -> number
+SDT.timing.needles(tMs, beatMs, beats, segments) -> Array(3) of {k, position, opacity} | null
+
+SDT.i18n.strings                               -> {zh:{...}, en:{...}}
+SDT.i18n.resolve(stored, navLang)              -> 'zh' | 'en'
+SDT.i18n.t(key, lang)                          -> string
+SDT.i18n.detect()                              -> 'zh' | 'en'   // 读 localStorage + navigator
+SDT.i18n.apply(lang, rootEl)                   -> void          // 写 DOM
+SDT.i18n.save(lang)                            -> void
+
+SDT.audio.isSupported()                        -> boolean
+SDT.audio.init()                               -> AudioContext
+SDT.audio.currentTime()                        -> number  // 秒
+SDT.audio.schedule(beatIndex, atSeconds)       -> void
+SDT.audio.cancelPending()                      -> number[]  // 被取消的拍号
+SDT.audio.prune()                              -> void
+SDT.audio.suspend() / resume()                 -> void
+SDT.audio.state()                              -> string
+```
+
+---
+
+## Task 1: 纯计时数学 + Node 测试运行器
+
+这是整个应用里最容易出错、也最值得测的部分：拍时刻换算、延迟重排、扫描头区间。
+
+**Files:**
+- Create: `tools/run-tests.js`
+- Create: `tests.js`
+- Create: `timing.js`
+
+- [ ] **Step 1: 写 Node 测试运行器**
+
+`tools/run-tests.js` 把应用脚本加载进一个 `vm` 沙箱（因为它们只碰 `window.SDT`，不碰 DOM），然后跑 `tests.js` 里的断言。缺文件时跳过而不报错，这样"先写测试后写实现"的流程能跑通。
+
+```js
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const ROOT = path.join(__dirname, '..');
+const APP_SCRIPTS = ['i18n.js', 'timing.js'];
+
+const sandbox = { console: console };
+vm.createContext(sandbox);
+sandbox.window = sandbox;           // 应用脚本用 root.SDT 挂载，浏览器里 root 是 window
+
+for (const file of APP_SCRIPTS) {
+  const full = path.join(ROOT, file);
+  if (!fs.existsSync(full)) continue;   // 允许先写测试、后写实现
+  vm.runInContext(fs.readFileSync(full, 'utf8'), sandbox, { filename: file });
+}
+
+if (!sandbox.SDT) sandbox.SDT = {};
+
+const results = [];
+sandbox.SDT.test = {
+  run(name, fn) {
+    try {
+      fn();
+      results.push({ name, ok: true });
+    } catch (err) {
+      results.push({ name, ok: false, error: err && err.message ? err.message : String(err) });
+    }
+  }
+};
+
+vm.runInContext(fs.readFileSync(path.join(ROOT, 'tests.js'), 'utf8'), sandbox, { filename: 'tests.js' });
+
+let failed = 0;
+for (const r of results) {
+  if (r.ok) {
+    console.log('  ok  ' + r.name);
+  } else {
+    failed++;
+    console.log(' FAIL ' + r.name + '\n        ' + r.error);
+  }
+}
+console.log('\n' + (results.length - failed) + ' passed, ' + failed + ' failed');
+process.exit(failed === 0 ? 0 : 1);
+```
+
+- [ ] **Step 2: 写第一组失败的测试**
+
+创建 `tests.js`。它必须在浏览器和 Node 沙箱里都能跑，所以只依赖 `root.SDT`，不依赖 `document`。
+
+```js
+(function (root) {
+  'use strict';
+
+  const SDT = root.SDT;
+  const T = SDT.timing;          // Task 1 里还不存在 —— 这一步就是要看它失败
+  const run = SDT.test.run;
+
+  function eq(actual, expected, what) {
+    if (actual !== expected) {
+      throw new Error((what || 'value') + ': expected ' + JSON.stringify(expected) +
+                      ', got ' + JSON.stringify(actual));
+    }
+  }
+
+  function close(actual, expected, tol, what) {
+    if (typeof actual !== 'number' || Math.abs(actual - expected) > tol) {
+      throw new Error((what || 'value') + ': expected ' + expected + ' ±' + tol +
+                      ', got ' + JSON.stringify(actual));
+    }
+  }
+
+  // ─────────── 拍时刻换算 ───────────
+
+  run('visualOffsetMs: 第 0 拍落在 1 个拍间隔处，最左那段是留白', function () {
+    eq(T.visualOffsetMs(0, 500), 500);
+    eq(T.visualOffsetMs(1, 500), 1000);
+    eq(T.visualOffsetMs(4, 500), 2500);
+  });
+
+  run('audioOffsetMs: 延迟只把音频往前挪，不动视觉', function () {
+    eq(T.audioOffsetMs(0, 500, 0), 500);
+    eq(T.audioOffsetMs(0, 500, 200), 300);
+    eq(T.audioOffsetMs(4, 500, 200), 2300);
+  });
+
+  run('派生常量', function () {
+    eq(T.cycleMs(500, 4), 2000);
+    eq(T.sweepMs(500, 5), 2500);
+    eq(T.delayMax(500), 500);
+    eq(T.startLeadMs(500), 1100);
+  });
+
+  // ─────────── 延迟钳制 ───────────
+
+  run('clampDelay: 上下界、取整、非法输入', function () {
+    eq(T.clampDelay(0, 500), 0);
+    eq(T.clampDelay(500, 500), 500);
+    eq(T.clampDelay(501, 500), 500);
+    eq(T.clampDelay(-5, 500), 0);
+    eq(T.clampDelay(12.4, 500), 12);
+    eq(T.clampDelay(12.6, 500), 13);
+    eq(T.clampDelay(NaN, 500), 0);
+    eq(T.clampDelay(undefined, 500), 0);
+    eq(T.clampDelay(Infinity, 500), 0);
+  });
+
+  // ─────────── 延迟改变后的重排起点 ───────────
+
+  run('firstFutureIndex: 启动阶段一律落在第 0 拍', function () {
+    eq(T.firstFutureIndex(0, 1100, 0, 500), 0);
+    eq(T.firstFutureIndex(0, 1100, 500, 500), 0);
+  });
+
+  run('firstFutureIndex: 返回的拍其音频时刻确实在未来，前一拍确实已过去', function () {
+    const nowMs = 10000, originMs = 1100, delayMs = 200, beatMs = 500;
+    const n = T.firstFutureIndex(nowMs, originMs, delayMs, beatMs);
+    const at = function (k) { return originMs + T.audioOffsetMs(k, beatMs, delayMs); };
+    eq(n, 18);
+    eq(at(n) > nowMs + T.SAFETY_MS, true, '第 n 拍应在安全线之后');
+    eq(at(n - 1) > nowMs + T.SAFETY_MS, false, '第 n-1 拍不应在安全线之后');
+  });
+
+  run('firstFutureIndex: 边界处不会提前半拍', function () {
+    // 第 18 拍的音频时刻 = 1100 + (19*500 - 200) = 10400。
+    // 安全线是 now+20，所以 now < 10380 时第 18 拍还排得上，到 10380 就必须换成第 19 拍。
+    eq(T.firstFutureIndex(10379, 1100, 200, 500), 18);
+    eq(T.firstFutureIndex(10380, 1100, 200, 500), 19);
+  });
+
+  // ─────────── 点与刻度的位置 ───────────
+
+  run('dotPosition: 5 段 4 点落在 20/40/60/80%', function () {
+    close(T.dotPosition(0, 5), 0.2, 1e-12);
+    close(T.dotPosition(1, 5), 0.4, 1e-12);
+    close(T.dotPosition(2, 5), 0.6, 1e-12);
+    close(T.dotPosition(3, 5), 0.8, 1e-12);
+  });
+
+  run('beatAgeMs: 取距上一次闪亮的时长，负数时间与跨轮都正确', function () {
+    eq(T.beatAgeMs(500, 0, 500, 2000), 0);
+    eq(T.beatAgeMs(1000, 1, 500, 2000), 0);
+    eq(T.beatAgeMs(2000, 3, 500, 2000), 0);
+    eq(T.beatAgeMs(2500, 0, 500, 2000), 0);        // 下一轮的滴
+    eq(T.beatAgeMs(2500, 3, 500, 2000), 500);
+    eq(T.beatAgeMs(0, 0, 500, 2000), 1500);        // t<0 之前，还没闪过
+    eq(T.beatAgeMs(-500, 0, 500, 2000), 1000);     // 负数时间要回绕成正数
+  });
+
+  // ─────────── 扫描头 ───────────
+
+  run('needles: t<0 时一个都不亮', function () {
+    const list = T.needles(-500, 500, 4, 5);
+    eq(list.length, 3, '槽位数固定为 3');
+    eq(list[0], null);
+    eq(list[1], null);
+    eq(list[2], null);
+  });
+
+  run('needles: 第 0 拍时扫描头正好走到第 0 个点（20%）', function () {
+    const list = T.needles(500, 500, 4, 5);
+    eq(list[0].k, 0);
+    close(list[0].position, 0.2, 1e-12);
+    eq(list[0].opacity, 1);
+    eq(list[1], null);
+  });
+
+  run('needles: 进入第 5 段时第 1 段同时起跑 —— 两个扫描头并行', function () {
+    const list = T.needles(2100, 500, 4, 5);
+    eq(list[0].k, 0);
+    close(list[0].position, 0.84, 1e-12);
+    eq(list[0].opacity, 1);
+    eq(list[1].k, 1);
+    close(list[1].position, 0.04, 1e-12);
+    close(list[1].opacity, 100 / 170, 1e-9, '新头正在淡入');
+    eq(list[2], null);
+  });
+
+  run('needles: 接力瞬间不跳变 —— 旧头已淡到看不见，新头已全亮', function () {
+    const before = T.needles(2499, 500, 4, 5);
+    close(before[0].opacity, 1 / 190, 1e-9, '旧头在 100% 处已几乎透明');
+    eq(before[1].opacity, 1, '新头已全亮');
+    const after = T.needles(2500, 500, 4, 5);
+    eq(after[0].k, 1, '槽位 0 接管新一轮');
+    close(after[0].position, 0.2, 1e-12);
+    eq(after[0].opacity, 1);
+    eq(after[1], null);
+  });
+
+  run('needles: 全程没有任何一拍出现两个可见扫描头以外的异常', function () {
+    for (let t = 0; t < 12000; t += 25) {
+      const list = T.needles(t, 500, 4, 5);
+      let visible = 0;
+      for (const n of list) {
+        if (!n) continue;
+        visible++;
+        if (!(n.position >= 0 && n.position < 1)) {
+          throw new Error('t=' + t + ' 位置越界: ' + n.position);
+        }
+        if (!(n.opacity >= 0 && n.opacity <= 1)) {
+          throw new Error('t=' + t + ' 透明度越界: ' + n.opacity);
+        }
+      }
+      if (visible > 2) throw new Error('t=' + t + ' 同时有 ' + visible + ' 个可见扫描头');
+    }
+  });
+
+  run('needles: 换一组拍间隔，段数关系不变', function () {
+    const list = T.needles(600, 300, 4, 5);        // beatMs=300 → cycle 1200 / sweep 1500
+    eq(list[0].k, 0);
+    close(list[0].position, 0.4, 1e-12);
+  });
+
+})(typeof window !== 'undefined' ? window : globalThis);
+```
+
+- [ ] **Step 3: 运行测试，确认失败**
+
+Run: `node tools/run-tests.js`
+Expected: 15 个用例全部 `FAIL`，错误信息是 `Cannot read properties of undefined (reading 'visualOffsetMs')` 之类（`timing.js` 还不存在），最后一行 `0 passed, 15 failed`。
+
+（若报的是"找不到 timing.js"，说明运行器的 `existsSync` 跳过逻辑没生效，回 Step 1 检查。）
+
+- [ ] **Step 4: 实现 `timing.js`**
+
+```js
+(function (root) {
+  'use strict';
+
+  const SDT = root.SDT = root.SDT || {};
+
+  const DEFAULTS = {
+    beatMs: 500,
+    beats: 4,
+    segments: 5,
+    stepFine: 1,
+    stepCoarse: 10
+  };
+
+  const NEEDLE_SLOTS = 3;      // 同屏最多 2 个（segments/beats = 5/4），留 1 个余量
+  const FADE_IN_MS = 170;
+  const FADE_OUT_MS = 190;
+  const SAFETY_MS = 20;
+
+  function cycleMs(beatMs, beats) { return beatMs * beats; }
+  function sweepMs(beatMs, segments) { return beatMs * segments; }
+  function delayMax(beatMs) { return beatMs; }
+  function startLeadMs(beatMs) { return beatMs + 600; }
+
+  // 第 n 拍相对 origin 的毫秒偏移。
+  // 从 (n+1) 起算而不是 n，是为了让 [0, beatMs) 这一段成为时间轴最左侧的留白：
+  // 扫描头从 0% 出发跑向第一个点，此时还没有任何一拍发生。
+  function visualOffsetMs(n, beatMs) { return (n + 1) * beatMs; }
+
+  // 延迟只移动音频，不动视觉 —— 视觉是那把尺子。
+  function audioOffsetMs(n, beatMs, delayMs) { return (n + 1) * beatMs - delayMs; }
+
+  // 满足 audioOffsetMs(n) > (now - origin) + safety 的最小 n，且不早于 0。
+  function firstFutureIndex(nowMs, originMs, delayMs, beatMs, safetyMs) {
+    const safe = (safetyMs === undefined) ? SAFETY_MS : safetyMs;
+    const n = Math.floor((nowMs + safe - originMs + delayMs) / beatMs);
+    return n < 0 ? 0 : n;
+  }
+
+  function clampDelay(v, max) {
+    if (typeof v !== 'number' || !isFinite(v)) return 0;
+    const r = Math.round(v);
+    if (r < 0) return 0;
+    if (r > max) return max;
+    return r;
+  }
+
+  function dotPosition(i, segments) { return (i + 1) / segments; }
+
+  function beatAgeMs(tMs, i, beatMs, cycle) {
+    let age = (tMs - beatMs * (i + 1)) % cycle;
+    if (age < 0) age += cycle;
+    return age;
+  }
+
+  // 返回长度固定为 NEEDLE_SLOTS 的数组，下标 = DOM 里的槽位。
+  // 槽位 j 对应第 (k0 + j) 个扫描头 —— 这个对应关系是接力不跳变的关键：
+  // 当 k0 递增时，槽位 0 接管的那个新头此刻已经全亮，而被它顶掉的老头已经淡到透明。
+  function needles(tMs, beatMs, beats, segments) {
+    const cycle = cycleMs(beatMs, beats);
+    const sweep = sweepMs(beatMs, segments);
+    let k0 = Math.floor((tMs - sweep) / cycle) + 1;
+    if (k0 < 0) k0 = 0;
+
+    const out = [];
+    for (let j = 0; j < NEEDLE_SLOTS; j++) {
+      const elapsed = tMs - (k0 + j) * cycle;
+      if (elapsed < 0 || elapsed >= sweep) {
+        out.push(null);
+        continue;
+      }
+      let opacity = 1;
+      if (elapsed < FADE_IN_MS) opacity = elapsed / FADE_IN_MS;
+      const tail = sweep - elapsed;
+      if (tail < FADE_OUT_MS) opacity = Math.min(opacity, tail / FADE_OUT_MS);
+      out.push({
+        k: k0 + j,
+        position: elapsed / sweep,
+        opacity: opacity < 0 ? 0 : opacity
+      });
+    }
+    return out;
+  }
+
+  SDT.timing = {
+    DEFAULTS: DEFAULTS,
+    NEEDLE_SLOTS: NEEDLE_SLOTS,
+    FADE_IN_MS: FADE_IN_MS,
+    FADE_OUT_MS: FADE_OUT_MS,
+    SAFETY_MS: SAFETY_MS,
+    cycleMs: cycleMs,
+    sweepMs: sweepMs,
+    delayMax: delayMax,
+    startLeadMs: startLeadMs,
+    visualOffsetMs: visualOffsetMs,
+    audioOffsetMs: audioOffsetMs,
+    firstFutureIndex: firstFutureIndex,
+    clampDelay: clampDelay,
+    dotPosition: dotPosition,
+    beatAgeMs: beatAgeMs,
+    needles: needles
+  };
+
+})(typeof window !== 'undefined' ? window : globalThis);
+```
+
+- [ ] **Step 5: 运行测试，确认全绿**
+
+Run: `node tools/run-tests.js`
+Expected: 全部 `ok`，最后一行 `15 passed, 0 failed`，退出码 0。
+
+- [ ] **Step 6: 提交**
+
+```bash
+git add timing.js tests.js tools/run-tests.js
+git commit -m "Add pure timing math with a zero-dependency test runner"
+```
+
+---
+
+## Task 2: 多语种
+
+**Files:**
+- Create: `i18n.js`
+- Modify: `tests.js`（在文件末尾、`})(typeof window ...` 之前追加）
+
+- [ ] **Step 1: 追加失败的测试**
+
+在 `tests.js` 里最后一个 `run(...)` 之后、`})(typeof window !== 'undefined' ? window : globalThis);` 之前插入：
+
+```js
+  // ─────────── 多语种 ───────────
+
+  run('i18n: 中英文案表的键完全一致', function () {
+    const zh = Object.keys(SDT.i18n.strings.zh).sort();
+    const en = Object.keys(SDT.i18n.strings.en).sort();
+    eq(zh.join(','), en.join(','), 'zh 与 en 的键集合');
+    for (const k of zh) {
+      if (!SDT.i18n.strings.zh[k]) throw new Error('zh.' + k + ' 是空的');
+      if (!SDT.i18n.strings.en[k]) throw new Error('en.' + k + ' 是空的');
+    }
+  });
+
+  run('i18n.resolve: 用户选过的语言优先', function () {
+    eq(SDT.i18n.resolve('zh', 'en-US'), 'zh');
+    eq(SDT.i18n.resolve('en', 'zh-CN'), 'en');
+  });
+
+  run('i18n.resolve: 没选过就看浏览器语言，中文只有 zh 开头才认', function () {
+    eq(SDT.i18n.resolve(null, 'zh-CN'), 'zh');
+    eq(SDT.i18n.resolve(null, 'zh'), 'zh');
+    eq(SDT.i18n.resolve(null, 'zh-Hant-TW'), 'zh');
+    eq(SDT.i18n.resolve(null, 'en-US'), 'en');
+    eq(SDT.i18n.resolve(null, 'fr-FR'), 'en');
+    eq(SDT.i18n.resolve(null, ''), 'en');
+    eq(SDT.i18n.resolve(null, undefined), 'en');
+  });
+
+  run('i18n.resolve: 非法的已存值当作没存过', function () {
+    eq(SDT.i18n.resolve('klingon', 'zh-CN'), 'zh');
+    eq(SDT.i18n.resolve(123, 'en-US'), 'en');
+  });
+
+  run('i18n.t: 取文案，缺键时回落到键名而不是 undefined', function () {
+    eq(SDT.i18n.t('app.title', 'zh'), '延迟测试');
+    eq(SDT.i18n.t('app.title', 'en'), 'Latency Test');
+    eq(SDT.i18n.t('controls.reset', 'zh'), '归零');
+    eq(SDT.i18n.t('nope.missing', 'zh'), 'nope.missing');
+    eq(SDT.i18n.t('app.title', 'klingon'), 'Latency Test', '未知语言回落到 en');
+  });
+```
+
+- [ ] **Step 2: 运行测试，确认失败**
+
+Run: `node tools/run-tests.js`
+Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undefined (reading 'strings')`；原有 15 个仍 `ok`。
+
+- [ ] **Step 3: 实现 `i18n.js`**
+
+`resolve` 和 `t` 是纯函数（这是它们可测的原因），只有 `detect` / `apply` / `save` 碰浏览器 API。
+
+```js
+(function (root) {
+  'use strict';
+
+  const SDT = root.SDT = root.SDT || {};
+  const STORE_KEY = 'sdt.lang';
+
+  const strings = {
+    zh: {
+      'app.title': '延迟测试',
+      'start.title': '戴上耳机，点击开始',
+      'start.subtitle': '把"滴嗒嗒哒"调到与闪动的点完全重合',
+      'start.button': '开始',
+      'controls.reset': '归零',
+      'controls.pause': '暂停',
+      'controls.resume': '继续',
+      'hint': '戴上耳机，把"滴嗒嗒哒"调到与闪动的点完全重合',
+      'caveat': '读数还包含设备自身的音频与显示延迟（通常 10–40ms），适合横向比较耳机，不是实验室级绝对值',
+      'error.noAudio': '当前浏览器不支持 Web Audio，无法运行'
+    },
+    en: {
+      'app.title': 'Latency Test',
+      'start.title': 'Put on your headphones',
+      'start.subtitle': 'Adjust the beat until it lines up with the flashing dots',
+      'start.button': 'Start',
+      'controls.reset': 'Reset',
+      'controls.pause': 'Pause',
+      'controls.resume': 'Resume',
+      'hint': 'Wear your headphones and adjust until the beat lines up with the dots',
+      'caveat': "Includes your device's own audio and display latency (typically 10–40 ms) — good for comparing headphones, not a lab-grade figure",
+      'error.noAudio': 'This browser does not support Web Audio'
+    }
+  };
+
+  const FALLBACK = 'en';
+
+  // 纯函数：用户选过的优先，其次看浏览器语言，中文只认 zh 开头
+  function resolve(stored, navLang) {
+    if (stored === 'zh' || stored === 'en') return stored;
+    if (typeof navLang === 'string' && navLang.slice(0, 2).toLowerCase() === 'zh') return 'zh';
+    return FALLBACK;
+  }
+
+  // 纯函数：语言不存在时回落到 en；键不存在时回落到键名本身（比 undefined 好排查）
+  function t(key, lang) {
+    const table = strings[lang] || strings[FALLBACK];
+    const value = table[key];
+    if (value !== undefined) return value;
+    const fallback = strings[FALLBACK][key];
+    return fallback !== undefined ? fallback : key;
+  }
+
+  function detect() {
+    let stored = null;
+    try { stored = root.localStorage.getItem(STORE_KEY); } catch (e) { /* 隐私模式会抛 */ }
+    const nav = root.navigator ? root.navigator.language : null;
+    return resolve(stored, nav);
+  }
+
+  function save(lang) {
+    try { root.localStorage.setItem(STORE_KEY, lang); } catch (e) { /* 写不进去就算了 */ }
+  }
+
+  // 带 data-i18n 的元素统一刷一遍
+  function apply(lang, rootEl) {
+    const nodes = rootEl.querySelectorAll('[data-i18n]');
+    for (let i = 0; i < nodes.length; i++) {
+      nodes[i].textContent = t(nodes[i].getAttribute('data-i18n'), lang);
+    }
+  }
+
+  SDT.i18n = {
+    strings: strings,
+    FALLBACK: FALLBACK,
+    resolve: resolve,
+    t: t,
+    detect: detect,
+    save: save,
+    apply: apply
+  };
+
+})(typeof window !== 'undefined' ? window : globalThis);
+```
+
+- [ ] **Step 4: 运行测试，确认全绿**
+
+Run: `node tools/run-tests.js`
+Expected: `20 passed, 0 failed`。
+
+- [ ] **Step 5: 提交**
+
+```bash
+git add i18n.js tests.js
+git commit -m "Add bilingual string table with language resolution"
+```
+
+---
+
+## Task 3: 页面骨架与样式
+
+没有自动化测试 —— 这一步的产物是结构和样式，验收靠 Task 6 之后的肉眼看。
+
+**Files:**
+- Create: `index.html`（同名，直接覆盖现有的原型）
+- Create: `styles.css`（新文件；现有的 `app.css` 是原型遗留，在 Task 7 里删除）
+
+- [ ] **Step 1: 写 `index.html`**
+
+```html
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>延迟测试</title>
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<div id="start-overlay" class="overlay">
+  <div class="overlay-icon">🎧</div>
+  <h1 class="overlay-title" data-i18n="start.title"></h1>
+  <p class="overlay-sub" data-i18n="start.subtitle"></p>
+  <button id="start-btn" class="overlay-btn" type="button" data-i18n="start.button"></button>
+  <p id="start-error" class="overlay-error" hidden></p>
+</div>
+
+<main id="app" class="app" hidden>
+  <header class="topbar">
+    <span class="brand" data-i18n="app.title"></span>
+    <span class="tools">
+      <button id="lang-btn" class="tool" type="button">
+        <span data-lang-tag="zh">中</span><i>/</i><span data-lang-tag="en">EN</span>
+      </button>
+      <button id="pause-btn" class="tool" type="button"></button>
+    </span>
+  </header>
+
+  <div class="indicator">
+    <div class="stage" id="stage">
+      <div class="dot" data-beat="0"></div>
+      <div class="dot" data-beat="1"></div>
+      <div class="dot" data-beat="2"></div>
+      <div class="dot" data-beat="3"></div>
+      <div class="tick" data-beat="0"></div>
+      <div class="tick" data-beat="1"></div>
+      <div class="tick" data-beat="2"></div>
+      <div class="tick" data-beat="3"></div>
+      <div class="track"></div>
+      <div class="needle"></div>
+      <div class="needle"></div>
+      <div class="needle"></div>
+    </div>
+  </div>
+
+  <div class="readout"><span id="delay-value">0</span><em>ms</em></div>
+
+  <div class="buttons">
+    <button class="btn step" type="button" data-step="-10">−10</button>
+    <button class="btn step" type="button" data-step="-1">−1</button>
+    <button class="btn step" type="button" data-step="1">+1</button>
+    <button class="btn step" type="button" data-step="10">+10</button>
+  </div>
+  <div class="buttons sub">
+    <button id="reset-btn" class="btn" type="button" data-i18n="controls.reset"></button>
+  </div>
+
+  <footer class="foot">
+    <p class="foot-hint" data-i18n="hint"></p>
+    <p class="foot-caveat" data-i18n="caveat"></p>
+  </footer>
+</main>
+
+<!-- 预留：节拍间隔由用户调整。当前 hidden，不对用户开放。见设计文档 §4.1 -->
+<div id="interval-slot" hidden>
+  <label>节拍间隔
+    <input id="interval-input" type="number" min="200" max="1000" step="50" value="500">
+  ms</label>
+</div>
+
+<script src="i18n.js"></script>
+<script src="timing.js"></script>
+<script src="audio.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
+```
+
+`#pause-btn` **故意不带** `data-i18n` —— 它的文案在"暂停/继续"之间切换，由 `app.js` 按运行状态写，交给 `i18n.apply` 会被覆盖成固定的"暂停"。
+
+- [ ] **Step 2: 写 `styles.css`**
+
+对照已确认的原型（`.superpowers/brainstorm/90265-1791777941/content/page-layout.html`）。颜色只在 `app.js` 里以 RGB 常量定义一次，CSS 这边不重复定义滴/嗒两色，避免两处漂移。
+
+```css
+:root {
+  --bg: #0d1117;
+  --panel: #131a24;
+  --slot: #1b2431;
+  --line: #2c3949;
+  --press: #2f4055;
+  --fg: #eaf2fb;
+  --fg-dim: #7d8899;
+  --fg-faint: #5b6675;
+
+  --dot-size: clamp(26px, 8vw, 38px);
+  --tick-h: clamp(16px, 4.6vw, 24px);
+  --needle-w: clamp(5px, 1.4vw, 7px);
+  --needle-h: clamp(28px, 8vw, 40px);
+  --stage-h: clamp(84px, 24vw, 116px);
+}
+
+* { box-sizing: border-box; }
+
+html, body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--fg);
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "PingFang SC",
+               "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+body {
+  min-height: 100vh;
+  min-height: 100dvh;
+  display: flex;
+  justify-content: center;
+  overflow-x: hidden;
+}
+
+/* ─────────── 启动遮罩 ─────────── */
+
+.overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 10;
+  background: var(--bg);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 28px;
+  text-align: center;
+}
+.overlay[hidden] { display: none; }
+.overlay-icon { font-size: 46px; margin-bottom: 6px; }
+.overlay-title { margin: 0; font-size: 20px; font-weight: 600; }
+.overlay-sub { margin: 0; font-size: 14px; color: var(--fg-dim); line-height: 1.6; }
+.overlay-btn {
+  margin-top: 20px;
+  padding: 14px 40px;
+  font: inherit;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--fg);
+  background: var(--press);
+  border: 1px solid #4a5d75;
+  border-radius: 12px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.overlay-btn:active { background: #3a4d66; }
+.overlay-error {
+  margin: 14px 0 0;
+  font-size: 13px;
+  color: #ff8f8f;
+  line-height: 1.6;
+}
+.overlay-error[hidden] { display: none; }
+
+/* ─────────── 主体 ─────────── */
+
+.app {
+  width: 100%;
+  max-width: 520px;
+  padding: 14px 16px calc(16px + env(safe-area-inset-bottom));
+  display: flex;
+  flex-direction: column;
+}
+.app[hidden] { display: none; }
+
+.topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+  font-size: 13px;
+  color: var(--fg-dim);
+}
+.topbar .brand { letter-spacing: .06em; }
+.topbar .tools { display: flex; align-items: center; gap: 6px; }
+
+.tool {
+  font: inherit;
+  font-size: 13px;
+  color: var(--fg-dim);
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  padding: 6px 10px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+}
+.tool:active { background: var(--slot); }
+.tool i { font-style: normal; opacity: .35; margin: 0 1px; }
+#lang-btn [data-lang-tag] { opacity: .4; }
+#lang-btn[data-lang="zh"] [data-lang-tag="zh"],
+#lang-btn[data-lang="en"] [data-lang-tag="en"] { opacity: 1; color: var(--fg); font-weight: 600; }
+#pause-btn[hidden] { display: none; }
+
+/* ─────────── 指示器 ─────────── */
+
+.indicator {
+  background: var(--panel);
+  border-radius: 16px;
+  padding: 0 20px;
+}
+.stage { position: relative; height: var(--stage-h); }
+
+/* 点：位置由 JS 写 left，垂直靠负 margin 居中在 19% 这条线上。
+   transform 留给 JS 做缩放脉冲，不参与定位。 */
+.dot {
+  --d: var(--dot-size);
+  position: absolute;
+  top: 19%;
+  left: 0;
+  width: var(--d);
+  height: var(--d);
+  margin-left: calc(var(--d) / -2);
+  margin-top: calc(var(--d) / -2);
+  border-radius: 50%;
+  background: rgba(125, 136, 153, .12);
+  will-change: transform, background, box-shadow;
+}
+.dot[data-beat="0"] { --d: calc(var(--dot-size) * 1.3); }
+
+.track {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: 74%;
+  height: 4px;
+  margin-top: -2px;
+  border-radius: 2px;
+  background: var(--slot);
+}
+
+.tick {
+  position: absolute;
+  top: 74%;
+  left: 0;
+  width: 3px;
+  height: var(--tick-h);
+  margin-top: calc(var(--tick-h) / -2);
+  margin-left: -1.5px;
+  border-radius: 2px;
+  background: rgba(125, 136, 153, .2);
+  will-change: background, box-shadow;
+}
+
+.needle {
+  position: absolute;
+  top: 74%;
+  left: 0;
+  width: var(--needle-w);
+  height: var(--needle-h);
+  margin-top: calc(var(--needle-h) / -2);
+  margin-left: calc(var(--needle-w) / -2);
+  border-radius: 3px;
+  background: var(--fg);
+  box-shadow: 0 0 14px rgba(234, 242, 251, .7);
+  opacity: 0;
+  will-change: left, opacity;
+}
+
+/* ─────────── 读数与按钮 ─────────── */
+
+.readout {
+  text-align: center;
+  margin: 20px 0 18px;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+}
+.readout #delay-value {
+  font-size: clamp(44px, 14vw, 60px);
+  font-weight: 600;
+  letter-spacing: -.02em;
+}
+.readout em {
+  font-style: normal;
+  font-size: 15px;
+  color: var(--fg-dim);
+  margin-left: 6px;
+}
+
+.buttons { display: flex; gap: 9px; margin-bottom: 9px; }
+.buttons.sub { margin-bottom: 0; }
+
+.btn {
+  flex: 1;
+  padding: 15px 4px;
+  font: inherit;
+  font-size: 17px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--fg);
+  background: var(--slot);
+  border: 1px solid var(--line);
+  border-radius: 11px;
+  cursor: pointer;
+  touch-action: manipulation;
+  -webkit-tap-highlight-color: transparent;
+  user-select: none;
+  -webkit-user-select: none;
+  transition: background .07s, transform .07s;
+}
+.btn.held, .btn:active { background: var(--press); border-color: #4a5d75; transform: scale(.97); }
+.buttons.sub .btn {
+  font-size: 13px;
+  font-weight: 500;
+  color: var(--fg-dim);
+  padding: 9px 4px;
+  background: transparent;
+  border-color: #232e3c;
+}
+
+/* ─────────── 底部提示 ─────────── */
+
+.foot { margin-top: auto; padding-top: 18px; text-align: center; }
+.foot-hint { margin: 0; font-size: 12px; line-height: 1.6; color: var(--fg-faint); }
+.foot-caveat { margin: 6px 0 0; font-size: 11px; line-height: 1.6; color: #414c5a; }
+```
+
+- [ ] **Step 3: 提交**
+
+```bash
+git add index.html styles.css
+git commit -m "Add page skeleton and styles"
+```
+
+（`app.css` 和旧的 `app.js` 先留着不动。`app.js` 在 Task 5 起被逐步重写成新实现，`app.css` 在 Task 7 里删除。）
+
+---
+
+## Task 4: 音频引擎 —— 音色合成
+
+**没有自动化测试**：需要真实音频硬件，见设计文档 §12。验收放在 Task 8 的应用总装之后。
+
+**Files:**
+- Create: `audio.js`
+
+- [ ] **Step 1: 写 `audio.js`**
+
+```js
+(function (root) {
+  'use strict';
+
+  const SDT = root.SDT = root.SDT || {};
+
+  // 丙方案：3ms 陡峭起音 + 指数衰减。
+  // 延迟测试靠的是起音瞬态 —— 余弦窗虽然也短，但起音被抹圆，
+  // 听感上的"时刻"会往后飘十几毫秒，正是我们要测的量级。
+  const TONES = {
+    di: { freq: 1600, ms: 50, gain: 0.60 },
+    da: { freq: 1100, ms: 50, gain: 0.60 }
+  };
+
+  const ATTACK_SEC = 0.003;
+  const DECAY_SEC = 0.012;
+  const TAIL_SEC = 0.002;
+  const CANCEL_CUTOFF_SEC = 0.005;   // 早于这个提前量的已排音频认为"已经在播"，不取消
+  const PRUNE_AFTER_SEC = 0.2;
+
+  let ctx = null;
+  let master = null;
+  let buffers = { di: null, da: null };
+  let pending = [];                  // { src, time, index }
+
+  function isSupported() {
+    return !!(root.AudioContext || root.webkitAudioContext);
+  }
+
+  function renderTone(spec) {
+    const sr = ctx.sampleRate;
+    const n = Math.max(2, Math.round(sr * spec.ms / 1000));
+    const buf = ctx.createBuffer(1, n, sr);
+    const data = buf.getChannelData(0);
+    const attack = Math.max(1, Math.round(sr * ATTACK_SEC));
+    const tail = Math.max(1, Math.round(sr * TAIL_SEC));
+    const decay = sr * DECAY_SEC;
+
+    for (let i = 0; i < n; i++) {
+      let env = Math.min(1, i / attack) * Math.exp(-i / decay);
+      if (i > n - tail) env *= (n - i) / tail;   // 末端线性归零，杜绝爆音
+      data[i] = Math.sin(2 * Math.PI * spec.freq * i / sr) * env * spec.gain;
+    }
+    return buf;
+  }
+
+  function init() {
+    if (ctx) return ctx;
+
+    const AC = root.AudioContext || root.webkitAudioContext;
+    ctx = new AC();
+
+    // iOS 16.4+：不设成 playback 的话，iPhone 的静音拨片会让 Web Audio 完全没声
+    if (root.navigator && root.navigator.audioSession) {
+      try { root.navigator.audioSession.type = 'playback'; } catch (e) { /* 不支持就算了 */ }
+    }
+
+    master = ctx.createGain();
+    master.gain.value = 1;
+    master.connect(ctx.destination);
+
+    buffers.di = renderTone(TONES.di);
+    buffers.da = renderTone(TONES.da);
+    return ctx;
+  }
+
+  function currentTime() { return ctx ? ctx.currentTime : 0; }
+  function state() { return ctx ? ctx.state : 'none'; }
+
+  function schedule(beatIndex, atSeconds) {
+    const src = ctx.createBufferSource();
+    src.buffer = (beatIndex % 4 === 0) ? buffers.di : buffers.da;
+    src.connect(master);
+    src.start(atSeconds);
+    pending.push({ src: src, time: atSeconds, index: beatIndex });
+  }
+
+  // 取消所有尚未开始播放的已排音频，返回被取消的拍号。
+  // 已经开始播的不动 —— 音长只有 50ms，让它自然收尾，避免中途掐断产生爆音。
+  function cancelPending() {
+    const cutoff = ctx.currentTime + CANCEL_CUTOFF_SEC;
+    const kept = [];
+    const cancelled = [];
+    for (const p of pending) {
+      if (p.time > cutoff) {
+        try { p.src.stop(); } catch (e) { /* 已经结束的会抛，忽略 */ }
+        cancelled.push(p.index);
+      } else {
+        kept.push(p);
+      }
+    }
+    pending = kept;
+    return cancelled;
+  }
+
+  function prune() {
+    const cutoff = ctx.currentTime - PRUNE_AFTER_SEC;
+    pending = pending.filter(function (p) { return p.time > cutoff; });
+  }
+
+  function suspend() { if (ctx && ctx.state === 'running') ctx.suspend(); }
+  function resume() { if (ctx && ctx.state === 'suspended') ctx.resume(); }
+
+  SDT.audio = {
+    TONES: TONES,
+    isSupported: isSupported,
+    init: init,
+    currentTime: currentTime,
+    state: state,
+    schedule: schedule,
+    cancelPending: cancelPending,
+    prune: prune,
+    suspend: suspend,
+    resume: resume
+  };
+
+})(typeof window !== 'undefined' ? window : globalThis);
+```
+
+- [ ] **Step 2: 确认没有打破已有的测试**
+
+Run: `node tools/run-tests.js`
+Expected: `20 passed, 0 failed`。
+
+`audio.js` 在 Node 里加载时 `root.AudioContext` 是 `undefined`，`init()` 不会被调用，所以不会抛异常。
+
+- [ ] **Step 3: 提交**
+
+```bash
+git add audio.js
+git commit -m "Add audio engine: tone synthesis and scheduling primitives"
+```
+
+---
+
+## Task 5: 指示器渲染
+
+**Files:**
+- Create: `app.js`（同名，整体替换原型遗留的旧文件）
+
+- [ ] **Step 1: 写 `app.js` 的指示器部分**
+
+这个文件后面几个 Task 会继续长，先只写渲染和最小启动骨架，让它能在浏览器里跑起来看动效。
+
+```js
+(function (root) {
+  'use strict';
+
+  const SDT = root.SDT = root.SDT || {};
+  const T = SDT.timing;
+  const I18N = SDT.i18n;
+
+  // 颜色只在这里定义一次。CSS 里不给滴/嗒上色，也就不会两处漂移。
+  const WARM = [255, 209, 102];
+  const COOL = [76, 201, 240];
+  const IDLE_ALPHA = 0.10;
+  const IDLE_ALPHA_DI = 0.12;
+  const FLASH_DECAY_MS = 70;
+  const GLOW_DOT_PX = 30;
+  const GLOW_TICK_PX = 16;
+
+  const LOOKAHEAD_MS = 120;
+  const TIMER_MS = 25;
+
+  const state = {
+    beatMs: T.DEFAULTS.beatMs,
+    beats: T.DEFAULTS.beats,
+    segments: T.DEFAULTS.segments,
+    delay: 0,
+    originMs: 0,
+    nextIndex: 0,
+    running: false,
+    paused: false
+  };
+
+  let els = null;
+  let timerId = null;
+  let lit = [];          // 每个点上一次是否处于"亮"的状态，用来省掉绝大多数重绘
+
+  function rgba(rgb, alpha) {
+    return 'rgba(' + rgb[0] + ',' + rgb[1] + ',' + rgb[2] + ',' + alpha.toFixed(3) + ')';
+  }
+
+  function collectElements() {
+    const stage = document.getElementById('stage');
+    const dots = Array.prototype.slice.call(stage.querySelectorAll('.dot'));
+    const ticks = Array.prototype.slice.call(stage.querySelectorAll('.tick'));
+
+    // 点的位置按 i 固定在 20/40/60/80%，只需算一次
+    for (let i = 0; i < dots.length; i++) {
+      const pct = (T.dotPosition(i, state.segments) * 100).toFixed(4) + '%';
+      dots[i].style.left = pct;
+      ticks[i].style.left = pct;
+    }
+
+    els = {
+      stage: stage,
+      dots: dots,
+      ticks: ticks,
+      needles: Array.prototype.slice.call(stage.querySelectorAll('.needle')),
+      delayValue: document.getElementById('delay-value')
+    };
+    lit = new Array(dots.length).fill(false);
+  }
+
+  function paintDot(el, rgb, e, idleAlpha) {
+    el.style.background = rgba(rgb, idleAlpha + (1 - idleAlpha) * e);
+    el.style.transform = 'scale(' + (1 + 0.13 * e).toFixed(4) + ')';
+    el.style.boxShadow = e < 0.01 ? 'none'
+      : '0 0 ' + (GLOW_DOT_PX * e).toFixed(1) + 'px ' + rgba(rgb, 0.55 * e);
+  }
+
+  function paintTick(el, rgb, e) {
+    el.style.background = rgba(rgb, 0.22 + 0.78 * e);
+    el.style.boxShadow = e < 0.01 ? 'none'
+      : '0 0 ' + (GLOW_TICK_PX * e).toFixed(1) + 'px ' + rgba(rgb, 0.7 * e);
+  }
+
+  // tMs 是相对 origin 的毫秒时间。tMs < 0 时什么都不会亮 ——
+  // 扫描头还没从最左端出发，第一拍也还没发生。
+  function renderIndicator(tMs) {
+    const beatMs = state.beatMs;
+    const cycle = T.cycleMs(beatMs, state.beats);
+
+    for (let i = 0; i < els.dots.length; i++) {
+      const e = Math.exp(-T.beatAgeMs(tMs, i, beatMs, cycle) / FLASH_DECAY_MS);
+      const rgb = i === 0 ? WARM : COOL;
+      const idle = i === 0 ? IDLE_ALPHA_DI : IDLE_ALPHA;
+
+      if (e < 0.01) {
+        if (lit[i]) {           // 衰减早已结束，不必每帧重写 —— 一拍里约 85% 的帧走这条路
+          lit[i] = false;
+          paintDot(els.dots[i], rgb, 0, idle);
+        }
+      } else {
+        lit[i] = true;
+        paintDot(els.dots[i], rgb, e, idle);
+      }
+      paintTick(els.ticks[i], rgb, e);
+    }
+
+    const needles = T.needles(tMs, beatMs, state.beats, state.segments);
+    for (let j = 0; j < els.needles.length; j++) {
+      const n = needles[j];
+      if (!n) {
+        els.needles[j].style.opacity = 0;
+      } else {
+        els.needles[j].style.left = (n.position * 100).toFixed(3) + '%';
+        els.needles[j].style.opacity = n.opacity.toFixed(3);
+      }
+    }
+  }
+
+  function renderReadout() {
+    els.delayValue.textContent = String(state.delay);
+  }
+
+  function frame() {
+    const tMs = SDT.audio.currentTime() * 1000 - state.originMs;
+    renderIndicator(tMs);
+    requestAnimationFrame(frame);
+  }
+
+  // 临时启动入口。Task 7 会把它换成启动遮罩。
+  // 现在点页面任意位置即可启动 —— 必须是真实点击：AudioContext 只允许在用户手势里恢复，
+  // 否则上下文一直挂起、currentTime 冻结，指示器根本不会动。
+  function tempStart() {
+    SDT.audio.init();
+    SDT.audio.resume();
+    state.originMs = (SDT.audio.currentTime() + T.startLeadMs(state.beatMs) / 1000) * 1000;
+    state.nextIndex = 0;
+    state.running = true;
+    document.getElementById('start-overlay').hidden = true;
+    document.getElementById('app').hidden = false;
+    requestAnimationFrame(frame);
+  }
+
+  document.addEventListener('DOMContentLoaded', function () {
+    collectElements();
+    renderReadout();
+    // 遮罩盖在最上层，但点击会冒泡到 document，所以点遮罩也算数
+    document.addEventListener('click', function once() {
+      document.removeEventListener('click', once);
+      tempStart();
+    });
+  });
+
+  SDT.app = {
+    state: state,
+    renderIndicator: renderIndicator,
+    renderReadout: renderReadout
+  };
+
+})(typeof window !== 'undefined' ? window : globalThis);
+```
+
+- [ ] **Step 2: 在浏览器里看动效对不对**
+
+打开 `index.html`，**点页面任意位置**（遮罩会消失，主体出现）。
+
+Expected（对照原型 `page-layout.html`）：
+- 上排 4 个点，第一个更大、暖色；下排一条时间轴，4 个刻度对齐在点的正下方
+- 扫描头从最左端出发，压到第 1 个刻度时第 1 个点同时亮起，往后逐个走
+- 走到最右端（约 2.5s）时，最左边已经同时冒出一个新扫描头 —— 两个并行约 0.5s，旧的淡出、新的接管，**全程没有任何回跳**
+
+- [ ] **Step 3: 提交**
+
+```bash
+git add app.js
+git commit -m "Add indicator rendering driven by the audio clock"
+```
+
+---
+
+## Task 6: 控件接线 —— 按钮、长按连发、键盘
+
+**Files:**
+- Modify: `app.js`
+
+- [ ] **Step 1: 在 `app.js` 里加入延迟控制**
+
+在 `renderReadout` 之后、`frame` 之前插入：
+
+```js
+  const HOLD_DELAY_MS = 380;
+  // 按住越久连发越快：110ms → 70ms → 40ms → 24ms
+  function repeatIntervalMs(heldMs) {
+    if (heldMs > 2200) return 24;
+    if (heldMs > 1400) return 40;
+    if (heldMs > 800) return 70;
+    return 110;
+  }
+
+  let holdTimer = null;
+  let holdButton = null;
+
+  function endHold() {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    if (holdButton) { holdButton.classList.remove('held'); holdButton = null; }
+  }
+
+  // 取消已排但还没响的音频，从其中最小的拍号续排。
+  // 见设计文档 §5.4：既不能重排已经响过的那一拍（会多一声），
+  // 也不能让 nextIndex 单调递增（会漏一声）。
+  function applyDelay(next) {
+    const clamped = T.clampDelay(next, T.delayMax(state.beatMs));
+    if (clamped === state.delay) return;
+    state.delay = clamped;
+    renderReadout();
+
+    if (!state.running) return;
+    const cancelled = SDT.audio.cancelPending();
+    if (cancelled.length) {
+      let min = cancelled[0];
+      for (const idx of cancelled) if (idx < min) min = idx;
+      state.nextIndex = min;
+    }
+    pump();
+  }
+
+  function beginHold(btn, step) {
+    endHold();
+    holdButton = btn;
+    btn.classList.add('held');
+    applyDelay(state.delay + step);
+
+    const t0 = performance.now();
+    function tick() {
+      applyDelay(state.delay + step);
+      holdTimer = setTimeout(tick, repeatIntervalMs(performance.now() - t0));
+    }
+    holdTimer = setTimeout(tick, HOLD_DELAY_MS);   // 按住 380ms 后开始连发
+  }
+
+  function wireControls() {
+    const buttons = document.querySelectorAll('.btn.step');
+    for (const btn of buttons) {
+      const step = parseInt(btn.getAttribute('data-step'), 10);
+      btn.addEventListener('pointerdown', function (e) {
+        e.preventDefault();          // 阻止长按选中和双击缩放
+        beginHold(btn, step);
+      });
+      btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+    }
+    // 释放监听到 window 上：手指滑出按钮再松开也要停
+    window.addEventListener('pointerup', endHold);
+    window.addEventListener('pointercancel', endHold);
+
+    document.getElementById('reset-btn').addEventListener('click', function () {
+      endHold();
+      applyDelay(0);
+    });
+
+    // 桌面键盘：← → 调 1ms，Shift + ← → 调 10ms
+    window.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const tag = (e.target && e.target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const step = (e.shiftKey ? T.DEFAULTS.stepCoarse : T.DEFAULTS.stepFine) *
+                   (e.key === 'ArrowRight' ? 1 : -1);
+      e.preventDefault();
+      applyDelay(state.delay + step);
+    });
+  }
+```
+
+在 `collectElements()` 末尾（`lit = new Array(...)` 之后）追加一行，把按钮也收进来：
+
+```js
+    wireControls();
+```
+
+- [ ] **Step 2: 把 `applyDelay` 暴露出来以便调试**
+
+把 `SDT.app` 那一段换成：
+
+```js
+  SDT.app = {
+    state: state,
+    applyDelay: applyDelay,
+    renderIndicator: renderIndicator,
+    renderReadout: renderReadout
+  };
+```
+
+- [ ] **Step 3: 在浏览器里验证**
+
+打开 `index.html`，点页面任意位置启动（同 Task 5）。
+
+Expected：
+1. 点 `+10`，读数每次加 10；按住不放约 0.4s 后开始连发，越按越快；松手即停
+2. 手指/鼠标**按住后滑出按钮再松开**，连发也要停
+3. `+10` 连按 50 次以上，读数**停在 500 不动**
+4. `−10` 一路按到 0 以下，读数**停在 0**
+5. "归零"一键回到 0
+6. 桌面按 `←` `→` 各动 1ms，`Shift+←` `Shift+→` 各动 10ms
+7. **调延迟时节奏不中断**：连按 `+10` 期间，滴嗒声应当只有一个整体位移，不会出现某一拍重复响或整拍消失
+8. 手机上（或 DevTools 设备模拟）长按按钮**不会**触发文字选中、也**不会**触发双击缩放
+
+- [ ] **Step 4: 提交**
+
+```bash
+git add app.js
+git commit -m "Add delay controls with press-and-hold repeat"
+```
+
+---
+
+## Task 7: 总装 —— 启动、暂停、语言切换、前瞻调度
+
+**Files:**
+- Modify: `app.js`
+- Delete: `app.css`、旧的 `app.js` 内容已被整体替换
+
+- [ ] **Step 1: 加前瞻调度器与启动流程**
+
+删掉 Task 5 留下的 `tempStart()` 以及那段临时的 `document.addEventListener('click', ...)`，换成下面这套：
+
+```js
+  // 前瞻调度：提前把音频排进 AudioContext 的采样级时间轴。
+  // 绝不能等定时器到点了才发声 —— 移动端 setTimeout 抖动可达几十毫秒，
+  // 比我们要测的量级还大。
+  function pump() {
+    if (!state.running || state.paused) return;
+    const beatMs = state.beatMs;
+    const horizonMs = SDT.audio.currentTime() * 1000 + LOOKAHEAD_MS;
+    while (state.originMs + T.audioOffsetMs(state.nextIndex, beatMs, state.delay) < horizonMs) {
+      const atSec = (state.originMs +
+                     T.audioOffsetMs(state.nextIndex, beatMs, state.delay)) / 1000;
+      SDT.audio.schedule(state.nextIndex, atSec);
+      state.nextIndex++;
+    }
+    SDT.audio.prune();
+  }
+
+  function restart() {
+    SDT.audio.cancelPending();
+    state.originMs = (SDT.audio.currentTime() + T.startLeadMs(state.beatMs) / 1000) * 1000;
+    state.nextIndex = 0;
+    pump();
+  }
+
+  function start() {
+    if (!SDT.audio.isSupported()) {
+      const err = document.getElementById('start-error');
+      err.textContent = I18N.t('error.noAudio', currentLang);
+      err.hidden = false;
+      return;
+    }
+    SDT.audio.init();
+    state.running = true;
+    state.paused = false;
+    restart();
+    if (timerId) clearInterval(timerId);
+    timerId = setInterval(pump, TIMER_MS);
+    document.getElementById('start-overlay').hidden = true;
+    document.getElementById('app').hidden = false;
+    requestAnimationFrame(frame);
+  }
+```
+
+- [ ] **Step 2: 加暂停与语言切换**
+
+```js
+  let currentLang = I18N.FALLBACK;
+
+  function setLang(lang) {
+    currentLang = lang;
+    I18N.apply(lang, document);
+    document.documentElement.lang = lang;
+    document.getElementById('lang-btn').setAttribute('data-lang', lang);
+    // 暂停按钮的文案随运行状态变，data-i18n 会把它写死，所以单独刷
+    document.getElementById('pause-btn').textContent =
+      I18N.t(state.paused ? 'controls.resume' : 'controls.pause', lang);
+    I18N.save(lang);
+  }
+
+  function setPaused(paused) {
+    state.paused = paused;
+    if (paused) SDT.audio.suspend(); else SDT.audio.resume();
+    document.getElementById('pause-btn').textContent =
+      I18N.t(paused ? 'controls.resume' : 'controls.pause', currentLang);
+  }
+
+  function wireChrome() {
+    document.getElementById('start-btn').addEventListener('click', start);
+
+    document.getElementById('pause-btn').addEventListener('click', function () {
+      setPaused(!state.paused);
+    });
+
+    document.getElementById('lang-btn').addEventListener('click', function () {
+      setLang(currentLang === 'zh' ? 'en' : 'zh');
+    });
+
+    // 切回前台时若音频上下文被挂起，恢复它。
+    // 因为一切以 ctx.currentTime 为准，不需要做任何重新对齐。
+    document.addEventListener('visibilitychange', function () {
+      if (!document.hidden && state.running && !state.paused) SDT.audio.resume();
+    });
+  }
+```
+
+- [ ] **Step 3: 接通预留的节拍间隔控件**
+
+```js
+  // 预留位：当前隐藏、不开放。但接线是通的，取消 hidden 即可生效。
+  function wireIntervalSlot() {
+    const input = document.getElementById('interval-input');
+    if (!input) return;
+    input.value = String(state.beatMs);
+    input.addEventListener('change', function () {
+      const v = Math.round(Number(input.value));
+      if (!isFinite(v) || v < 200 || v > 1000) {
+        input.value = String(state.beatMs);
+        return;
+      }
+      state.beatMs = v;
+      state.delay = T.clampDelay(state.delay, T.delayMax(v));
+      renderReadout();
+      if (state.running) restart();
+    });
+  }
+```
+
+- [ ] **Step 4: 替换初始化入口**
+
+把 Task 5 里那段临时的 `document.addEventListener('DOMContentLoaded', ...)` 换成：
+
+```js
+  document.addEventListener('DOMContentLoaded', function () {
+    collectElements();
+    renderReadout();
+    wireChrome();
+    wireIntervalSlot();
+    setLang(I18N.detect());
+  });
+```
+
+注意 `wireControls()` 已经在 `collectElements()` 里调用了（Task 6 Step 1），不要重复调用。
+
+- [ ] **Step 5: 删除废弃文件并最终提交**
+
+```bash
+git rm app.css
+git add app.js index.html
+git commit -m "Wire up start, pause, language switching and the lookahead scheduler"
+```
+
+`app.js` 是同名替换，`git add` 会记录修改。
+
+- [ ] **Step 6: 全流程人工验收**
+
+Run: `node tools/run-tests.js`
+Expected: `20 passed, 0 failed`。
+
+然后起一个本地静态服务（`file://` 下 `AudioContext` 可用，但用 `http://` 更接近真实环境）：
+
+```bash
+python3 -m http.server 8000
+```
+
+浏览器打开 `http://localhost:8000`，逐条走设计文档 §12 的人工清单：
+
+1. 首屏是启动遮罩，中英双语；点"开始"后遮罩消失、声音立刻起来
+2. 未点"开始"之前**完全没有声音**（浏览器自动播放策略）
+3. 点"开始"后约 1.1s 静默，然后第一声"滴"响起，同时第 1 个点闪亮
+4. 戴上蓝牙耳机，把延迟调到听觉与闪光重合 —— 这就是测量结果
+5. 暂停 → 声音和动效**同时**冻结；继续 → 从原处接上，不跳变
+6. 切到别的标签页再切回来 → 音画仍然同步（网页保持运行的前提下）
+7. 点「中/EN」→ 全部文案（含底部两行小字）立即切换，刷新后仍是上次选的语言
+8. 手机 Chrome、iOS Safari 各走一遍上述流程；iOS 上确认静音拨片打开时仍有声
+
+- [ ] **Step 7: 提交验收记录**
+
+```bash
+git add -A
+git commit --allow-empty -m "Verify end-to-end manual acceptance checklist"
+```
+
+---
+
+## Task 8: 浏览器自检页
+
+让用户不装 Node 也能验证纯逻辑。
+
+**Files:**
+- Create: `tests.html`
+
+- [ ] **Step 1: 写 `tests.html`**
+
+```html
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="dark">
+<title>自检 / Self-test</title>
+<style>
+  body {
+    margin: 0; padding: 24px;
+    background: #0d1117; color: #eaf2fb;
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+    font-size: 13px; line-height: 1.7;
+  }
+  h1 { font-size: 16px; margin: 0 0 4px; }
+  p.sub { color: #7d8899; margin: 0 0 18px; }
+  .ok::before { content: "ok   "; color: #4cc9f0; }
+  .fail::before { content: "FAIL "; color: #ff8f8f; }
+  .fail { color: #ff8f8f; }
+  .fail .why { display: block; color: #7d8899; padding-left: 5ch; }
+  #summary { margin-top: 18px; padding-top: 12px; border-top: 1px solid #2c3949; font-weight: 600; }
+  #summary.bad { color: #ff8f8f; }
+</style>
+</head>
+<body>
+<h1>自检 / Self-test</h1>
+<p class="sub">纯逻辑部分。需要真实耳机和真实硬件的部分见设计文档 §12 的人工清单。</p>
+<div id="results"></div>
+<div id="summary"></div>
+
+<script>
+  window.SDT = window.SDT || {};
+  var results = [];
+  SDT.test = {
+    run: function (name, fn) {
+      try { fn(); results.push({ name: name, ok: true }); }
+      catch (err) { results.push({ name: name, ok: false, error: err && err.message }); }
+    }
+  };
+</script>
+<script src="i18n.js"></script>
+<script src="timing.js"></script>
+<script src="tests.js"></script>
+<script>
+  (function () {
+    var box = document.getElementById('results');
+    var failed = 0;
+    results.forEach(function (r) {
+      var div = document.createElement('div');
+      div.className = r.ok ? 'ok' : 'fail';
+      div.textContent = r.name;
+      if (!r.ok) {
+        failed++;
+        var why = document.createElement('span');
+        why.className = 'why';
+        why.textContent = r.error;
+        div.appendChild(why);
+      }
+      box.appendChild(div);
+    });
+    var s = document.getElementById('summary');
+    s.textContent = (results.length - failed) + ' passed, ' + failed + ' failed';
+    if (failed) s.className = 'bad';
+  })();
+</script>
+</body>
+</html>
+```
+
+- [ ] **Step 2: 验证浏览器与 Node 结果一致**
+
+Run: `node tools/run-tests.js`
+Expected: `20 passed, 0 failed`
+
+打开 `http://localhost:8000/tests.html`（用 Task 7 起的服务）。
+Expected: 页面底部 `20 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
+
+- [ ] **Step 3: 提交**
+
+```bash
+git add tests.html
+git commit -m "Add browser self-test page"
+```
+
+---
+
+## Task 9: 响应式打磨与收尾
+
+**Files:**
+- Modify: `styles.css`（仅在实测发现问题时）
+- Modify: `README.md`（新建，说明怎么用和怎么加语言）
+
+- [ ] **Step 1: 逐档验证布局**
+
+在 DevTools 里依次切到 320×568、390×844、768×1024（竖）、1024×768（横）、1440×900：
+- 指示器、读数、四键在任何一档都不重叠、不溢出
+- 宽屏下整列限宽 520px 居中，**指示器不会被拉宽**（拉宽会让扫描头跑太快，反而不好对齐）
+- 横屏手机（高度小）时四键仍在首屏内，不需要滚动
+
+任何一档不达标，改 `styles.css` 里的 `clamp()` 参数或断点，改完重跑一遍。
+
+- [ ] **Step 2: 写 `README.md`**
+
+```markdown
+# 无线耳机延迟测试器
+
+纯静态网页，无依赖、无构建。用来测蓝牙耳机的音频延迟。
+
+## 怎么用
+
+戴上耳机，点「开始」。页面会按固定节奏播放"滴嗒嗒哒"。用下面的按钮调整延迟值，
+直到听感上声音与闪动的点完全重合 —— 屏幕上那个数字就是测得的延迟。
+
+- 一排四键：外侧是 ±10ms 粗调，内侧是 ±1ms 微调；**按住不放会连续加速**
+- 桌面还可以用 `←` `→` 调 1ms，`Shift + ←` `→` 调 10ms
+- 量程 0–500ms。上限不能再高：拍间隔本身就是 500ms，延迟 d 和 d+500 看起来是一样的
+
+读数还包含设备自身的音频与显示延迟（通常 10–40ms），所以它适合横向比较耳机、
+判断低延迟模式有没有生效，但不是实验室级绝对值。
+
+## 本地运行
+
+不需要构建。因为音频上下文和普通 script 在 `file://` 下都能用，直接双击
+`index.html` 即可；想更接近真实环境就起个静态服务：
+
+    python3 -m http.server 8000
+
+## 跑测试
+
+纯逻辑部分有断言，Node 和浏览器两边跑的是同一份 `tests.js`：
+
+    node tools/run-tests.js        # 终端
+    open http://localhost:8000/tests.html   # 浏览器
+
+需要真实耳机和真实硬件的部分（iOS 静音拨片、长按连发、前后台切换等）
+走人工清单，见 `docs/superpowers/specs/` 下的设计文档 §12。
+
+## 加一门语言
+
+在 `i18n.js` 的 `strings` 里加一个键（比如 `ja`），照 `zh` 把所有键补全。
+`tests.js` 里有一条断言会检查所有语言的键集合一致，加完跑一次测试即可。
+另外把 `resolve()` 里的语言探测规则补上，并在 `app.js` 的「中/EN」切换按钮上接入。
+
+## 预留但未开放
+
+`index.html` 里的 `#interval-slot` 是节拍间隔的用户调节位，当前 `hidden`。
+去掉 `hidden` 即可生效 —— 接线是通的，改间隔会自动重算循环长度、扫描头行程和延迟上限。
+```
+
+- [ ] **Step 3: 最终全量验证**
+
+```bash
+node tools/run-tests.js
+git status --short
+```
+
+Expected: `20 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
+
+- [ ] **Step 4: 提交**
+
+```bash
+git add README.md styles.css
+git commit -m "Add README and finish responsive polish"
+```
+
+---
+
+## 完成标准
+
+- [ ] `node tools/run-tests.js` 全绿
+- [ ] `tests.html` 在浏览器里结果与终端一致
+- [ ] 手机 Chrome、iOS Safari 上完整走通一次测量
+- [ ] 桌面 Chrome、平板横竖屏布局均不溢出
+- [ ] 中英文切换即时生效且刷新后保持
+- [ ] 暂停/继续、前后台切换后音画仍然同步
+- [ ] 0 与 500 两个边界都钳得住
