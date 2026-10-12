@@ -823,6 +823,15 @@ git commit -m "Add bilingual string table with language resolution"
   <p class="overlay-sub" data-i18n="start.subtitle"></p>
   <button id="start-btn" class="overlay-btn" type="button" data-i18n="start.button"></button>
   <p id="start-error" class="overlay-error" hidden></p>
+  <!-- 必须待在遮罩内部。遮罩是 fixed + z-index:10 + 不透明背景铺满整屏，
+       放在文档流里会被它整个盖住 —— 那等于写了一段看不见的补救。
+       JS 开着时 noscript 的内容根本不参与渲染，不会影响正常布局。 -->
+  <noscript>
+    <p style="color: var(--fg-dim); font-size: 14px; line-height: 1.7; margin: 14px 0 0">
+      这个页面需要 JavaScript 才能发声和计时。<br>
+      This page needs JavaScript to produce sound and keep time.
+    </p>
+  </noscript>
 </div>
 
 <main id="app" class="app" hidden>
@@ -877,13 +886,6 @@ git commit -m "Add bilingual string table with language resolution"
     <input id="interval-input" type="number" min="200" max="1000" step="50" value="500">
   ms</label>
 </div>
-
-<noscript>
-  <p style="padding:24px;text-align:center;color:#7d8899;font-size:14px;line-height:1.7">
-    这个页面需要 JavaScript 才能发声和计时。<br>
-    This page needs JavaScript to produce sound and keep time.
-  </p>
-</noscript>
 
 <script src="i18n.js"></script>
 <script src="timing.js"></script>
@@ -1046,7 +1048,7 @@ body {
 }
 .stage { position: relative; height: var(--stage-h); }
 
-/* 点：位置由 JS 写 left，垂直靠负 margin 居中在 19% 这条线上。
+/* 点：位置由 JS 写 left，垂直靠负 margin 居中在 --dot-y 这条线上。
    transform 留给 JS 做缩放脉冲，不参与定位。 */
 .dot {
   --d: var(--dot-size);
