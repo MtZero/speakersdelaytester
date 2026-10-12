@@ -126,7 +126,7 @@
 
   function suspend() { if (ctx && ctx.state === 'running') ctx.suspend(); }
 
-  // 系统可以在任何时候掐掉音频会话，而且**不产生任何页面事件**。最典型的是 AirPods 的
+  // 系统可以在任何时候掐掉音频会话，而且**不产生任何页面事件**。最典型的是蓝牙耳机的
   // 入耳检测：摘下耳机，macOS/iOS 暂停音频会话，AudioContext 随之被挂起，currentTime 冻结。
   // 指示器是用同一个时钟驱动的，所以会跟着一起冻住 —— 仪器看着正常，其实已经死了。
   // 只有 statechange 能抓到这种情况（visibilitychange 抓不到：页面一直是可见的）。
