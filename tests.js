@@ -285,6 +285,21 @@
     }
   });
 
+  // 连发曲线是 Task 6 里唯一有明确数值契约的东西，而它曾经住在 app.js 里 ——
+  // 那里的代码既不被 Node 运行器加载，也没法被它加载（app.js 在顶层就绑 DOM）。
+  // 搬进 timing.js 之后，每个档位两侧的边界都能钉住了。
+  run('连发曲线：每个档位的两侧都钉住', function () {
+    eq(T.HOLD_DELAY_MS, 380);
+    eq(T.repeatIntervalMs(0), 110);
+    eq(T.repeatIntervalMs(800), 110, '800 本身还在最慢档');
+    eq(T.repeatIntervalMs(801), 70, '过 800 才进下一档');
+    eq(T.repeatIntervalMs(1400), 70);
+    eq(T.repeatIntervalMs(1401), 40);
+    eq(T.repeatIntervalMs(2200), 40);
+    eq(T.repeatIntervalMs(2201), 24);
+    eq(T.repeatIntervalMs(10000), 24);
+  });
+
   // 这台仪器赖以成立的不变量：扫描头压到第 i 个点的**时刻**，
   // 正好就是第 i 个点闪亮的**时刻**。用户就是靠这个重合去调延迟的。
   // 单函数各自钉死绝对值的那些测试挡不住"约定整体偏移"式的重构，这一条可以。

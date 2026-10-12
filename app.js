@@ -52,6 +52,7 @@
       dots: dots,
       ticks: ticks,
       needles: Array.prototype.slice.call(stage.querySelectorAll('.needle')),
+      readout: document.querySelector('.readout'),
       delayValue: document.getElementById('delay-value')
     };
     lit = new Array(dots.length).fill(null);   // null = 还没画过，见 renderIndicator
@@ -128,17 +129,9 @@
     els.delayValue.textContent = String(state.delay);
   }
 
-  const HOLD_DELAY_MS = 380;
-  // 按住越久连发越快：110ms → 70ms → 40ms → 24ms
-  function repeatIntervalMs(heldMs) {
-    if (heldMs > 2200) return 24;
-    if (heldMs > 1400) return 40;
-    if (heldMs > 800) return 70;
-    return 110;
-  }
-
   let holdTimer = null;
   let holdButton = null;
+  let holdPointerId = null;
 
   function endHold() {
     // endHold 挂在 window 的 pointerup/pointercancel 上，也就是**应用里任何一次点击**
@@ -148,13 +141,22 @@
     const wasHolding = holdButton !== null;
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     if (holdButton) { holdButton.classList.remove('held'); holdButton = null; }
+    holdPointerId = null;
     if (!wasHolding) return;
 
     // 先把 aria-live 恢复成 polite，再写一次读数 ——
     // 连发期间的每一次改动（包括最后一次）都发生在 off 状态，而"恢复 polite"本身
     // 不构成一次播报。补一次赋值才会产生 mutation，屏幕阅读器也就只念这一个最终值。
-    document.querySelector('.readout').setAttribute('aria-live', 'polite');
-    if (els) renderReadout();
+    els.readout.setAttribute('aria-live', 'polite');
+    renderReadout();
+  }
+
+  // 只有发起这次连发的那根手指/那支笔有资格结束它。
+  // 不辨来源的话：一根手指按住 +10、另一根手指点一下 -1 再抬起，
+  // 会把 +10 的连发一并掐掉 —— 按钮看着还按着却不再响应，值也卡在中途。
+  function endHoldFromPointer(e) {
+    if (e.pointerId !== holdPointerId) return;
+    endHold();
   }
 
   // 这里只管数值：夹取、刷新读数。
@@ -168,30 +170,40 @@
     renderReadout();
   }
 
-  function beginHold(btn, step) {
+  function beginHold(btn, step, pointerId) {
     endHold();
     holdButton = btn;
+    holdPointerId = pointerId;
     btn.classList.add('held');
     // 连发时读数每秒要改几十次。aria-live 一直是 polite 的话，屏幕阅读器要么排队
     // 要么来不及处理；先关掉，松手时再打开，于是它只会念出最终值那一次。
-    document.querySelector('.readout').setAttribute('aria-live', 'off');
+    els.readout.setAttribute('aria-live', 'off');
     applyDelay(state.delay + step);
 
     const t0 = performance.now();
     function tick() {
       applyDelay(state.delay + step);
-      holdTimer = setTimeout(tick, repeatIntervalMs(performance.now() - t0));
+      holdTimer = setTimeout(tick, T.repeatIntervalMs(performance.now() - t0));
     }
-    holdTimer = setTimeout(tick, HOLD_DELAY_MS);   // 按住 380ms 后开始连发
+    holdTimer = setTimeout(tick, T.HOLD_DELAY_MS);   // 按住 380ms 后开始连发
   }
 
   function wireControls() {
     const buttons = document.querySelectorAll('.btn.step');
     for (const btn of buttons) {
       const step = parseInt(btn.getAttribute('data-step'), 10);
+      // 属性打错或漏了会得到 NaN，而 clampDelay 把非有限值当 0 ——
+      // 于是那个按钮会静默地把用户的测量清零。宁可响亮地失败。
+      if (!isFinite(step) || step === 0) {
+        throw new Error('data-step 不是有效步长: ' + btn.outerHTML);
+      }
+
       btn.addEventListener('pointerdown', function (e) {
-        e.preventDefault();          // 阻止长按选中和双击缩放
-        beginHold(btn, step);
+        // 鼠标不要 preventDefault：它会连带压掉 mousedown 的默认动作（把焦点交给按钮），
+        // 于是点过的按钮不会成为 Tab 的起点。触摸才需要拦，防的是长按选中和双击缩放 ——
+        // 而这两件事 CSS 里本来就都覆盖了（.btn 的 user-select、.btn.step 的 touch-action）。
+        if (e.pointerType !== 'mouse') e.preventDefault();
+        beginHold(btn, step, e.pointerId);
       });
       btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 
@@ -199,12 +211,26 @@
       // 只接 pointerdown 的话，聚焦到按钮再按回车是没有反应的。
       // detail === 0 是合成点击（键盘/AT），鼠标和触摸是 1，用它避免一次按压走两步。
       btn.addEventListener('click', function (e) {
-        if (e.detail === 0) applyDelay(state.delay + step);
+        if (e.detail !== 0) return;
+        applyDelay(state.delay + step);
+        // 已经到边界（0 或 500）时再按就没有变化了，而屏幕阅读器只对变化有反应 ——
+        // 键盘/AT 用户会完全收不到任何反馈。补写一次产生 mutation，把当前值念出来。
+        renderReadout();
       });
     }
-    // 释放监听到 window 上：手指滑出按钮再松开也要停
-    window.addEventListener('pointerup', endHold);
-    window.addEventListener('pointercancel', endHold);
+    // 释放监听到 window 上：手指滑出按钮再松开也要停。
+    // 用 endHoldFromPointer 而不是 endHold —— 只有发起那次连发的指针才能结束它。
+    window.addEventListener('pointerup', endHoldFromPointer);
+    window.addEventListener('pointercancel', endHoldFromPointer);
+
+    // 释放事件有可能永远不来：按住时 Alt+Tab 切走、弹出权限框、在窗口外松手。
+    // 不兜底的话连发会一直跑下去 —— 值卡在边界、.held 一直亮着，
+    // 而且 aria-live 停在 off，读数从此不再播报。三个都是便宜的兜网，endHold 本身幂等。
+    window.addEventListener('blur', endHold);
+    window.addEventListener('pagehide', endHold);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) endHold();
+    });
 
     // Task 7 会把它改成走 restart()（理由见那里）。现在只改数值。
     document.getElementById('reset-btn').addEventListener('click', function () {
@@ -214,9 +240,19 @@
 
     // 桌面键盘：← → 调 1ms，Shift + ← → 调 10ms
     window.addEventListener('keydown', function (e) {
+      // 还没开始就不要改值：那时读数藏在 hidden 的容器里，按了没有任何可见反馈，
+      // 却已经把延迟预设成了一个非零值。
+      if (!state.running) return;
+      // 带修饰键的一律放行：Safari 里 Cmd+← 是"后退"，Windows 上 Chrome 的 Alt+← 也是。
+      // 拦下来会把它变成改延迟值 —— 用户想返回上一页，结果静默改掉了自己的测量，
+      // 浏览器那边也没有跳转。这一条在目标平台上随时可复现。
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.isComposing) return;                    // 输入法组合中，方向键是在选字
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-      const tag = (e.target && e.target.tagName) || '';
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const target = e.target;
+      const tag = (target && target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (target && target.isContentEditable) return;   // 可编辑区域内部的元素 tagName 不是 INPUT
       const step = (e.shiftKey ? T.DEFAULTS.stepCoarse : T.DEFAULTS.stepFine) *
                    (e.key === 'ArrowRight' ? 1 : -1);
       e.preventDefault();

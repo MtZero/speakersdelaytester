@@ -95,6 +95,17 @@
     return r;
   }
 
+  // 长按连发的时序。放在这里而不是 app.js，就是为了能被测 ——
+  // 它是设计文档 §8.2 写死的数值契约，不是随手调的手感参数。
+  const HOLD_DELAY_MS = 380;
+  // 按住越久连发越快：110ms → 70ms → 40ms → 24ms
+  function repeatIntervalMs(heldMs) {
+    if (heldMs > 2200) return 24;
+    if (heldMs > 1400) return 40;
+    if (heldMs > 800) return 70;
+    return 110;
+  }
+
   function dotPosition(i, segments) { return (i + 1) / segments; }
 
   function beatAgeMs(tMs, i, beatMs, cycle) {
@@ -148,6 +159,8 @@
     resumeIndex: resumeIndex,
     pendingBeats: pendingBeats,
     clampDelay: clampDelay,
+    HOLD_DELAY_MS: HOLD_DELAY_MS,
+    repeatIntervalMs: repeatIntervalMs,
     dotPosition: dotPosition,
     beatAgeMs: beatAgeMs,
     needles: needles
