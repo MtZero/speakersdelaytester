@@ -1858,6 +1858,8 @@ git commit -m "Add delay controls with press-and-hold repeat"
 **Files:**
 - Modify: `app.js`
 - Modify: `i18n.js`（加 `error.audioLost`，两种语言都要加；键一致性测试会自动覆盖它）
+  —— 注意它已经写在本计划 Task 2 的 `i18n.js` 代码块里了，所以实际文件可能**已经**有这个键。
+  先 `grep audioLost i18n.js` 确认，缺了才补，别重复添加。
 
 - [ ] **Step 1: 加前瞻调度器与启动流程**
 
