@@ -7,6 +7,9 @@
 <!-- 标签页标题也走 data-i18n：document.querySelectorAll 会遍历到 <head>，
      所以 app.js 里那句 apply(lang, document) 顺手就把它本地化了，不需要额外代码 -->
 <title data-i18n="app.title">延迟测试</title>
+<!-- 内联的 SVG 图标：不额外引文件、断网也在，顺便消掉浏览器那次 favicon.ico 的 404。
+     颜色用的是"滴"那个点的暖琥珀色，和界面语言一致。 -->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'><circle cx='16' cy='16' r='11' fill='%23ffd166'/></svg>">
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
