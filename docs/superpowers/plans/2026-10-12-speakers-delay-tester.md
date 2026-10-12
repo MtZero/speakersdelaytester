@@ -1856,9 +1856,9 @@ git commit -m "Add indicator rendering driven by the audio clock"
     const t0 = performance.now();
     function tick() {
       applyDelay(state.delay + step);
-      holdTimer = setTimeout(tick, repeatIntervalMs(performance.now() - t0));
+      holdTimer = setTimeout(tick, T.repeatIntervalMs(performance.now() - t0));
     }
-    holdTimer = setTimeout(tick, HOLD_DELAY_MS);   // 按住 380ms 后开始连发
+    holdTimer = setTimeout(tick, T.HOLD_DELAY_MS);   // 按住 380ms 后开始连发
   }
 
 > **一条要守住的隐式不变量（Task 7 注意）：** `aria-live="off"` 只有 `beginHold` 一处会写，
