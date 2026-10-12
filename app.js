@@ -55,6 +55,7 @@
       delayValue: document.getElementById('delay-value')
     };
     lit = new Array(dots.length).fill(null);   // null = 还没画过，见 renderIndicator
+    wireControls();
   }
 
   function paintDot(el, rgb, e, idleAlpha) {
@@ -127,6 +128,95 @@
     els.delayValue.textContent = String(state.delay);
   }
 
+  const HOLD_DELAY_MS = 380;
+  // 按住越久连发越快：110ms → 70ms → 40ms → 24ms
+  function repeatIntervalMs(heldMs) {
+    if (heldMs > 2200) return 24;
+    if (heldMs > 1400) return 40;
+    if (heldMs > 800) return 70;
+    return 110;
+  }
+
+  let holdTimer = null;
+  let holdButton = null;
+
+  function endHold() {
+    if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
+    if (holdButton) { holdButton.classList.remove('held'); holdButton = null; }
+    // 先把 aria-live 恢复成 polite，再写一次读数 ——
+    // 连发期间的每一次改动（包括最后一次）都发生在 off 状态，而"恢复 polite"本身
+    // 不构成一次播报。补一次赋值才会产生 mutation，屏幕阅读器也就只念这一个最终值。
+    document.querySelector('.readout').setAttribute('aria-live', 'polite');
+    if (els) renderReadout();
+  }
+
+  // 这里只管数值：夹取、刷新读数。
+  // 音频那一半（取消已排、重排、pump）属于 Task 7 —— 调度器那时才存在。
+  // 现在就把 pump() 写进去的话，它是个未声明的标识符，一点按钮就 ReferenceError；
+  // 而 renderReadout() 在抛错之前已经执行，表现成"数字会动、别的地方坏了"，很难查。
+  function applyDelay(next) {
+    const clamped = T.clampDelay(next, T.delayMax(state.beatMs));
+    if (clamped === state.delay) return;
+    state.delay = clamped;
+    renderReadout();
+  }
+
+  function beginHold(btn, step) {
+    endHold();
+    holdButton = btn;
+    btn.classList.add('held');
+    // 连发时读数每秒要改几十次。aria-live 一直是 polite 的话，屏幕阅读器要么排队
+    // 要么来不及处理；先关掉，松手时再打开，于是它只会念出最终值那一次。
+    document.querySelector('.readout').setAttribute('aria-live', 'off');
+    applyDelay(state.delay + step);
+
+    const t0 = performance.now();
+    function tick() {
+      applyDelay(state.delay + step);
+      holdTimer = setTimeout(tick, repeatIntervalMs(performance.now() - t0));
+    }
+    holdTimer = setTimeout(tick, HOLD_DELAY_MS);   // 按住 380ms 后开始连发
+  }
+
+  function wireControls() {
+    const buttons = document.querySelectorAll('.btn.step');
+    for (const btn of buttons) {
+      const step = parseInt(btn.getAttribute('data-step'), 10);
+      btn.addEventListener('pointerdown', function (e) {
+        e.preventDefault();          // 阻止长按选中和双击缩放
+        beginHold(btn, step);
+      });
+      btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
+
+      // 键盘和辅助技术激活 <button> 时派发的是合成 click，pointerdown 根本不会触发 ——
+      // 只接 pointerdown 的话，聚焦到按钮再按回车是没有反应的。
+      // detail === 0 是合成点击（键盘/AT），鼠标和触摸是 1，用它避免一次按压走两步。
+      btn.addEventListener('click', function (e) {
+        if (e.detail === 0) applyDelay(state.delay + step);
+      });
+    }
+    // 释放监听到 window 上：手指滑出按钮再松开也要停
+    window.addEventListener('pointerup', endHold);
+    window.addEventListener('pointercancel', endHold);
+
+    // Task 7 会把它改成走 restart()（理由见那里）。现在只改数值。
+    document.getElementById('reset-btn').addEventListener('click', function () {
+      endHold();
+      applyDelay(0);
+    });
+
+    // 桌面键盘：← → 调 1ms，Shift + ← → 调 10ms
+    window.addEventListener('keydown', function (e) {
+      if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
+      const tag = (e.target && e.target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const step = (e.shiftKey ? T.DEFAULTS.stepCoarse : T.DEFAULTS.stepFine) *
+                   (e.key === 'ArrowRight' ? 1 : -1);
+      e.preventDefault();
+      applyDelay(state.delay + step);
+    });
+  }
+
   let lastTMs = null;
 
   // 渲染并记录 tMs。顺序是有意的：**渲染成功之后**才记录 ——
@@ -181,6 +271,7 @@
 
   SDT.app = {
     state: state,
+    applyDelay: applyDelay,
     // 包一层：直接暴露 renderIndicator 的话，外部探针调用会绕过 lastTMs 的记账 ——
     // 时钟冻住时循环会以为"没变过"而跳过，面板就停在探针画的那个状态，直到时钟再动。
     renderIndicator: function (t) {
