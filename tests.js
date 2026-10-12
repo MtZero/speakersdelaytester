@@ -52,6 +52,18 @@
     eq(T.clampDelay(NaN, 500), 0);
     eq(T.clampDelay(undefined, 500), 0);
     eq(T.clampDelay(Infinity, 500), 0);
+    // 输入框递过来的是字符串，不能因为类型就把用户的延迟静默清零
+    eq(T.clampDelay('12', 500), 12);
+    eq(T.clampDelay('12.6', 500), 13);
+    eq(T.clampDelay('abc', 500), 0);
+  });
+
+  run('DEFAULTS 与页面结构一致：4 个点、5 段、扫描头槽位够用', function () {
+    eq(T.DEFAULTS.beats, 4, 'index.html 里正好 4 个 .dot');
+    eq(T.DEFAULTS.segments, 5, 'index.html 里正好 4 个 .tick，即 5 段');
+    const need = Math.ceil(T.DEFAULTS.segments / T.DEFAULTS.beats);
+    eq(T.NEEDLE_SLOTS >= need, true,
+       'NEEDLE_SLOTS=' + T.NEEDLE_SLOTS + ' 不够 ' + need + ' 个并行扫描头');
   });
 
   // ─────────── 延迟改变后的重排起点 ───────────
@@ -75,6 +87,28 @@
     // 安全线是 now+20，所以 now < 10380 时第 18 拍还排得上，到 10380 就必须换成第 19 拍。
     eq(T.firstFutureIndex(10379, 1100, 200, 500), 18);
     eq(T.firstFutureIndex(10380, 1100, 200, 500), 19);
+  });
+
+  run('resumeIndex: 什么都没有被取消时，不回退到更小的拍号', function () {
+    // now=2600 时第 3 拍还在未来，但当前已经排到第 7 拍。
+    // 没有拍被取消就不该回头，否则第 3..6 拍会被重排、多响几声。
+    eq(T.resumeIndex(7, [], 2600, 1100, 0, 500), 7);
+    eq(T.resumeIndex(7, null, 2600, 1100, 0, 500), 7);
+    eq(T.resumeIndex(7, undefined, 2600, 1100, 0, 500), 7);
+  });
+
+  run('resumeIndex: 从被取消的最小拍号续排，不丢拍也不重排', function () {
+    // 第 3、4 拍被取消 → 从第 3 拍续排（此刻它仍在未来，floor 是 3）
+    eq(T.resumeIndex(5, [4, 3], 2600, 1100, 0, 500), 3);
+  });
+
+  run('resumeIndex: 拍会被排到过去时，往后跳到未来 —— 这是暂停后改延迟的必经之路', function () {
+    // 暂停在 ctx=3000ms 时把延迟从 0 拉到 500：第 3 拍的音频时刻
+    // 从 1100+2000=3100 前移到 1100+2000-500=2600，已经是过去。
+    // 只取 max(min(cancelled), floor) 才能既不重排已响过的、又不炸响。
+    eq(T.resumeIndex(3, [3], 3000, 1100, 500, 500), 4);
+    // 对照：同样的取消集合，不改延迟时第 3 拍仍在未来，就该从第 3 拍续
+    eq(T.resumeIndex(3, [3], 3000, 1100, 0, 500), 3);
   });
 
   // ─────────── 点与刻度的位置 ───────────
@@ -158,6 +192,27 @@
     const list = T.needles(600, 300, 4, 5);        // beatMs=300 → cycle 1200 / sweep 1500
     eq(list[0].k, 0);
     close(list[0].position, 0.4, 1e-12);
+  });
+
+  // 这台仪器赖以成立的不变量：扫描头压到第 i 个点的**时刻**，
+  // 正好就是第 i 个点闪亮的**时刻**。用户就是靠这个重合去调延迟的。
+  // 单函数各自钉死绝对值的那些测试挡不住"约定整体偏移"式的重构，这一条可以。
+  run('不变量：扫描头压到第 i 个点，正是第 i 个点闪亮的时刻', function () {
+    const beatMs = 500, beats = 4, segments = 5;
+    const cycle = T.cycleMs(beatMs, beats);
+    for (let i = 0; i < beats; i++) {
+      const target = T.dotPosition(i, segments);
+      for (let m = 0; m < 6; m++) {
+        const tMs = T.visualOffsetMs(i, beatMs) + m * cycle;
+        eq(T.beatAgeMs(tMs, i, beatMs, cycle), 0, 't=' + tMs + ' 第 ' + i + ' 个点应当刚闪');
+        let hit = null;
+        for (const n of T.needles(tMs, beatMs, beats, segments)) {
+          if (n && Math.abs(n.position - target) < 1e-12) hit = n;
+        }
+        eq(hit !== null, true, 't=' + tMs + ' 没有扫描头压在第 ' + i + ' 个点上');
+        eq(hit.opacity, 1, 't=' + tMs + ' 压点的扫描头应当是全亮的');
+      }
+    }
   });
 
 })(typeof window !== 'undefined' ? window : globalThis);

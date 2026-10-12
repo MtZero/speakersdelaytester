@@ -36,9 +36,32 @@
     return n < 0 ? 0 : n;
   }
 
+  // 改延迟之后，下一拍该从哪一号继续排。这是整个调度里最容易出事的一处，
+  // 所以它必须是个纯函数、必须被测试覆盖。两个约束缺一不可：
+  //
+  //   1. 不低于被取消的最小拍号 —— 否则会把"已经响过"的拍再排一次，用户多听到一声。
+  //   2. 不低于 firstFutureIndex —— 否则会把拍排到过去。Web Audio 对过去的 start 时刻
+  //      不报错，直接立刻播；结果是一声炸响之后节奏被压缩（两拍挤在一起）。
+  //      暂停后改延迟必然触发：ctx.currentTime 冻结，而音频时刻随延迟前移。
+  function resumeIndex(nextIndex, cancelled, nowMs, originMs, delayMs, beatMs) {
+    let n = nextIndex;
+    if (cancelled && cancelled.length) {
+      let min = cancelled[0];
+      for (let i = 1; i < cancelled.length; i++) {
+        if (cancelled[i] < min) min = cancelled[i];
+      }
+      n = min;
+    }
+    const floor = firstFutureIndex(nowMs, originMs, delayMs, beatMs);
+    return n < floor ? floor : n;
+  }
+
+  // Number() 先转一道：调用方可能直接把 input.value（字符串）递进来，
+  // 不转的话 "12" 会被判成非法输入、静默把用户的延迟清零。
   function clampDelay(v, max) {
-    if (typeof v !== 'number' || !isFinite(v)) return 0;
-    const r = Math.round(v);
+    const n = Number(v);
+    if (!isFinite(n)) return 0;
+    const r = Math.round(n);
     if (r < 0) return 0;
     if (r > max) return max;
     return r;
@@ -47,7 +70,7 @@
   function dotPosition(i, segments) { return (i + 1) / segments; }
 
   function beatAgeMs(tMs, i, beatMs, cycle) {
-    let age = (tMs - beatMs * (i + 1)) % cycle;
+    let age = (tMs - visualOffsetMs(i, beatMs)) % cycle;
     if (age < 0) age += cycle;
     return age;
   }
@@ -75,7 +98,7 @@
       out.push({
         k: k0 + j,
         position: elapsed / sweep,
-        opacity: opacity < 0 ? 0 : opacity
+        opacity: opacity
       });
     }
     return out;
@@ -94,6 +117,7 @@
     visualOffsetMs: visualOffsetMs,
     audioOffsetMs: audioOffsetMs,
     firstFutureIndex: firstFutureIndex,
+    resumeIndex: resumeIndex,
     clampDelay: clampDelay,
     dotPosition: dotPosition,
     beatAgeMs: beatAgeMs,

@@ -1,3 +1,4 @@
+// 开发用，不部署。只依赖 Node 内置模块，不是"外部库"。
 'use strict';
 
 const fs = require('fs');
@@ -5,7 +6,9 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const APP_SCRIPTS = ['i18n.js', 'timing.js'];
+// audio.js 也一起加载：它在顶层不碰 document / AudioContext，所以在裸 vm 里能安全求值，
+// 顺带把它的语法错误挡在提交之前。
+const APP_SCRIPTS = ['i18n.js', 'timing.js', 'audio.js'];
 
 const sandbox = { console: console };
 vm.createContext(sandbox);
@@ -32,6 +35,12 @@ sandbox.SDT.test = {
 };
 
 vm.runInContext(fs.readFileSync(path.join(ROOT, 'tests.js'), 'utf8'), sandbox, { filename: 'tests.js' });
+
+// 一条都没跑也算失败 —— 否则 tests.js 被改坏成空文件时，这个运行器会安静地报"全绿"
+if (!results.length) {
+  console.log('no tests ran');
+  process.exit(1);
+}
 
 let failed = 0;
 for (const r of results) {
