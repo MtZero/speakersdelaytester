@@ -8,13 +8,13 @@
     zh: {
       'app.title': '延迟测试',
       'start.title': '戴上耳机，点击开始',
-      'start.subtitle': '把"滴嗒嗒哒"调到与闪动的点完全重合',
+      'start.subtitle': '把“滴嗒嗒哒”调到与闪动的点完全重合',
       'start.button': '开始',
       'controls.reset': '归零',
       'controls.pause': '暂停',
       'controls.resume': '继续',
-      'hint': '戴上耳机，把"滴嗒嗒哒"调到与闪动的点完全重合',
-      'caveat': '读数还包含设备自身的音频与显示延迟（通常 10–40ms），适合横向比较耳机，不是实验室级绝对值',
+      'hint': '戴上耳机，把“滴嗒嗒哒”调到与闪动的点完全重合',
+      'caveat': '读数还包含设备自身的音频与显示延迟（通常 10–40 ms），适合横向比较耳机，不是实验室级绝对值',
       'error.noAudio': '当前浏览器不支持 Web Audio，无法运行'
     },
     en: {
@@ -33,16 +33,26 @@
 
   const FALLBACK = 'en';
 
-  // 纯函数：用户选过的优先，其次看浏览器语言，中文只认 zh 开头
+  // 语言身份以文案表为准，这两个函数里不写死任何语言代码 ——
+  // 加一门语言 = 往 strings 里加一条，不需要回来改逻辑。
+  // 顺带避免 strings['constructor'] 这类原型链上的键被当成"有这门语言"。
+  function hasLanguage(code) {
+    return typeof code === 'string' && Object.prototype.hasOwnProperty.call(strings, code);
+  }
+
+  // 纯函数：用户选过的优先，其次看浏览器语言的前两位
   function resolve(stored, navLang) {
-    if (stored === 'zh' || stored === 'en') return stored;
-    if (typeof navLang === 'string' && navLang.slice(0, 2).toLowerCase() === 'zh') return 'zh';
+    if (hasLanguage(stored)) return stored;
+    if (typeof navLang === 'string') {
+      const code = navLang.slice(0, 2).toLowerCase();
+      if (hasLanguage(code)) return code;
+    }
     return FALLBACK;
   }
 
   // 纯函数：语言不存在时回落到 en；键不存在时回落到键名本身（比 undefined 好排查）
   function t(key, lang) {
-    const table = strings[lang] || strings[FALLBACK];
+    const table = hasLanguage(lang) ? strings[lang] : strings[FALLBACK];
     const value = table[key];
     if (value !== undefined) return value;
     const fallback = strings[FALLBACK][key];

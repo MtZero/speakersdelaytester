@@ -258,14 +258,37 @@
 
   // ─────────── 多语种 ───────────
 
-  run('i18n: 中英文案表的键完全一致', function () {
-    const zh = Object.keys(SDT.i18n.strings.zh).sort();
-    const en = Object.keys(SDT.i18n.strings.en).sort();
-    eq(zh.join(','), en.join(','), 'zh 与 en 的键集合');
-    for (const k of zh) {
-      if (!SDT.i18n.strings.zh[k]) throw new Error('zh.' + k + ' 是空的');
-      if (!SDT.i18n.strings.en[k]) throw new Error('en.' + k + ' 是空的');
+  // 遍历文案表本身，而不是写死 zh / en —— 否则加第三门语言时，
+  // 一条漏了键的新表会安静地通过，而 README 却向用户承诺这条检查覆盖"所有语言"。
+  run('i18n: 所有语言的键集合完全一致，且没有空串', function () {
+    const langs = Object.keys(SDT.i18n.strings);
+    eq(langs.length >= 2, true, '至少要两种语言，当前 ' + langs.length);
+    eq(typeof SDT.i18n.strings[SDT.i18n.FALLBACK], 'object',
+       'FALLBACK (' + SDT.i18n.FALLBACK + ') 必须真的在文案表里');
+
+    const reference = langs[0];
+    const expected = Object.keys(SDT.i18n.strings[reference]).sort().join(',');
+    for (const lang of langs) {
+      const table = SDT.i18n.strings[lang];
+      eq(Object.keys(table).sort().join(','), expected,
+         lang + ' 的键集合应当与 ' + reference + ' 一致');
+      for (const k of Object.keys(table)) {
+        if (!table[k]) throw new Error(lang + '.' + k + ' 是空的');
+      }
     }
+  });
+
+  // apply() 是唯一把文案真正写到屏幕上的函数，而它本身没有分支
+  // （查表的逻辑在上面的 t() 里）。用一个假节点就能在无 DOM 的环境里钉住它。
+  run('i18n.apply: 把文案写进 [data-i18n] 节点，缺键回落成键名', function () {
+    const nodes = [
+      { textContent: null, getAttribute: function () { return 'app.title'; } },
+      { textContent: null, getAttribute: function () { return 'nope.missing'; } }
+    ];
+    const fakeRoot = { querySelectorAll: function (sel) { return sel === '[data-i18n]' ? nodes : []; } };
+    SDT.i18n.apply('zh', fakeRoot);
+    eq(nodes[0].textContent, '延迟测试');
+    eq(nodes[1].textContent, 'nope.missing');
   });
 
   run('i18n.resolve: 用户选过的语言优先', function () {
