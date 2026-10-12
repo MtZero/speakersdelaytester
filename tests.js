@@ -323,4 +323,38 @@
     eq(SDT.i18n.t('toString', 'en'), 'toString');
   });
 
+  // ─────────── 音色合成 ───────────
+  // renderTone 是纯函数（只吃采样率和参数，返回 Float32Array），所以这些断言
+  // 不需要音频硬件就能跑。"首尾必须归零"这条尤其值得测 —— 否则会爆音，
+  // 而爆音只能靠耳朵发现，正是最容易漏掉的那类缺陷。
+
+  run('audio.renderTone: 首尾精确归零、峰值受控、时长正确', function () {
+    const spec = SDT.audio.TONES.di;
+    const sr = 48000;
+    const data = SDT.audio.renderTone(spec, sr);
+
+    eq(data.length, Math.round(sr * spec.ms / 1000), '时长');
+    eq(data[0], 0, '第一个样本必须精确为 0');
+    eq(data[data.length - 1], 0, '最后一个样本必须精确为 0');
+
+    let peak = 0, peakAt = 0;
+    for (let i = 0; i < data.length; i++) {
+      const a = Math.abs(data[i]);
+      if (a > peak) { peak = a; peakAt = i; }
+    }
+    eq(peak <= spec.gain + 1e-6, true, '峰值不应超过设定增益，实际 ' + peak.toFixed(4));
+    eq(peak > spec.gain * 0.6, true, '峰值也不该远低于设定增益，实际 ' + peak.toFixed(4));
+    eq(peakAt / sr <= 0.005, true,
+       '峰值应落在起音后 5ms 内，实际 ' + (peakAt / sr * 1000).toFixed(2) + 'ms —— ' +
+       '延迟测试靠的是这个瞬态，起音拖长了听感上的"时刻"就会往后飘');
+  });
+
+  run('audio: 滴比嗒频率高，且四个音等长', function () {
+    eq(SDT.audio.TONES.di.freq > SDT.audio.TONES.da.freq, true, '滴必须比嗒高，否则听不出"滴嗒嗒哒"');
+    eq(SDT.audio.TONES.di.freq, 1600);
+    eq(SDT.audio.TONES.da.freq, 1100);
+    eq(SDT.audio.TONES.di.ms, SDT.audio.TONES.da.ms, '等长，节奏才均匀');
+    eq(SDT.audio.TONES.di.ms, 50);
+  });
+
 })(typeof window !== 'undefined' ? window : globalThis);
