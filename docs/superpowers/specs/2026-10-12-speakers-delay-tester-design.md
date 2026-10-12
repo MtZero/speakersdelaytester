@@ -167,6 +167,7 @@ nextIndex = max(base, floor)
 - 若 `navigator.audioSession` 存在（iOS 16.4+），设 `navigator.audioSession.type = 'playback'`，否则 iPhone 的静音拨片会让 Web Audio 完全没声。
 - 创建/恢复必须在用户手势里调用 —— 这就是启动遮罩存在的唯一原因。
 - 不支持 AudioContext 时在遮罩上给出提示文案（`error.noAudio`）。
+- **恢复时不能只判断 `'suspended'`。** iOS/macOS Safari 在来电、Siri、闹钟、锁屏之后会把 `ctx.state` 置成非标准的 `'interrupted'`（规范里没有这个值）。只认 `'suspended'` 的话，恢复调用是静默空操作：`currentTime` 冻结、指示器跟着冻住，而应用内部的"正在运行"标志还说是好的 —— 仪器看着活着其实已经死了，只能刷新页面。对一个全部价值就在于读数可信的工具，这是最坏的失效方式。所以判据是"不是 running 也不是 closed 就试着恢复"，并且要接住 `resume()` 返回的 promise（WebKit 可能拒绝这次恢复，吞掉的话故障又变回静默）。
 
 ## 7. 视觉指示器
 

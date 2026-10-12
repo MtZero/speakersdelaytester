@@ -379,6 +379,56 @@ process.exit(failed === 0 ? 0 : 1);
     eq(r.nextIndex, 0, '什么也没排时 nextIndex 不能前进，否则会漏拍');
   });
 
+  // ─────────── 音频队列记账 ───────────
+  // init() 是调用时才去取 root.AudioContext 的，所以可以先塞一个假的进去，
+  // 驱动真实的 audio.js —— 不需要音频硬件，仍然跑在裸 vm 里。
+  //
+  // 两条限制写清楚，免得后人以为覆盖得比实际多：
+  //   1. 测的是"我们的记账"，不是浏览器语义。stop() 能不能真的掐掉一个已排的声音，
+  //      只有 Task 8 的浏览器自检页能验。
+  //   2. ctx 在 audio.js 里是模块私有且只建一次，所以这组用例拥有本进程唯一那次 init()。
+  run('audio 记账：取消边界与 timing 一致，且只停被取消的', function () {
+    const made = [];
+    function FakeCtx() {
+      this.currentTime = 100;
+      this.sampleRate = 48000;
+      this.state = 'running';
+      this.destination = {};
+      this.createGain = function () { return { gain: { value: 1 }, connect: function () {} }; };
+      this.createBuffer = function (ch, len) {
+        return { getChannelData: function () { return new Float32Array(len); } };
+      };
+      this.createBufferSource = function () {
+        const s = { buffer: null, stops: 0, connect: function () {}, start: function () {}, stop: function () { s.stops++; } };
+        made.push(s);
+        return s;
+      };
+      this.resume = function () { return Promise.resolve(); };
+    }
+
+    const realAC = root.AudioContext;
+    root.AudioContext = FakeCtx;
+    try {
+      const a = SDT.audio;
+      a.init();
+      eq(a.state(), 'running');
+
+      // 分界线是 now + CANCEL_CUTOFF_MS/1000 = 100.005
+      a.schedule(0, 100.005);   // 恰好压线
+      a.schedule(1, 100.004);   // 已经过去（等于正在播）
+      a.schedule(2, 100.006);   // 还排得上
+
+      const cancelled = a.cancelPending();
+      eq(cancelled.join(','), '2',
+         '只有严格大于分界线的才取消 —— 和 timing.js 的 pendingBeats 必须给出同一个判断');
+      eq(made[2].stops, 1, '被取消的停一次');
+      eq(made[0].stops, 0, '恰好压线的不停');
+      eq(made[1].stops, 0, '已在播的不停 —— 不能把正在响的音掐断');
+    } finally {
+      root.AudioContext = realAC;
+    }
+  });
+
   // 这台仪器赖以成立的不变量：扫描头压到第 i 个点的**时刻**，
   // 正好就是第 i 个点闪亮的**时刻**。用户就是靠这个重合去调延迟的。
   // 单函数各自钉死绝对值的那些测试挡不住"约定整体偏移"式的重构，这一条可以。
@@ -1315,6 +1365,10 @@ Expected: 新增 2 个用例 `FAIL`，错误是 `Cannot read properties of undef
   const CANCEL_CUTOFF_SEC = SDT.timing.CANCEL_CUTOFF_MS / 1000;
   const PRUNE_AFTER_SEC = 0.2;
 
+  // 一轮几拍归 timing.js 管。写死字面量的话，哪天周期长度一改，
+  // 计时和视觉都跟着变，只有音频层还在傻傻地按 4 拍一组播"滴嗒嗒哒"。
+  const BEATS_PER_CYCLE = SDT.timing.DEFAULTS.beats;
+
   let ctx = null;
   let master = null;
   let buffers = { di: null, da: null };
@@ -1372,9 +1426,14 @@ Expected: 新增 2 个用例 `FAIL`，错误是 `Cannot read properties of undef
   function currentTime() { return ctx ? ctx.currentTime : 0; }
   function state() { return ctx ? ctx.state : 'none'; }
 
+  function requireCtx() {
+    if (!ctx) throw new Error('SDT.audio: 先调用 init()');
+  }
+
   function schedule(beatIndex, atSeconds) {
+    requireCtx();
     const src = ctx.createBufferSource();
-    src.buffer = (beatIndex % 4 === 0) ? buffers.di : buffers.da;
+    src.buffer = (beatIndex % BEATS_PER_CYCLE === 0) ? buffers.di : buffers.da;
     src.connect(master);
     src.start(atSeconds);
     pending.push({ src: src, time: atSeconds, index: beatIndex });
@@ -1383,12 +1442,16 @@ Expected: 新增 2 个用例 `FAIL`，错误是 `Cannot read properties of undef
   // 取消所有尚未开始播放的已排音频，返回被取消的拍号。
   // 已经开始播的不动 —— 音长只有 50ms，让它自然收尾，避免中途掐断产生爆音。
   function cancelPending() {
+    requireCtx();
     const cutoff = ctx.currentTime + CANCEL_CUTOFF_SEC;
     const kept = [];
     const cancelled = [];
     for (const p of pending) {
       if (p.time > cutoff) {
-        try { p.src.stop(); } catch (e) { /* 已经结束的会抛，忽略 */ }
+        // 规范里"已经响完再 stop"是无操作；会抛的是"start 之前就 stop"，
+        // 而 schedule() 永远先 start 再记账，所以那条路走不到。
+        // 留着 catch 是给老版本 WebKit 兜底，不是因为它按规范会抛。
+        try { p.src.stop(); } catch (e) {}
         cancelled.push(p.index);
       } else {
         kept.push(p);
@@ -1399,12 +1462,26 @@ Expected: 新增 2 个用例 `FAIL`，错误是 `Cannot read properties of undef
   }
 
   function prune() {
+    requireCtx();
     const cutoff = ctx.currentTime - PRUNE_AFTER_SEC;
     pending = pending.filter(function (p) { return p.time > cutoff; });
   }
 
   function suspend() { if (ctx && ctx.state === 'running') ctx.suspend(); }
-  function resume() { if (ctx && ctx.state === 'suspended') ctx.resume(); }
+
+  // 不能只判断 'suspended'。iOS/macOS Safari 在来电、Siri、闹钟、锁屏之后会把
+  // ctx.state 置成非标准的 'interrupted'（不在规范里），此时旧写法是静默空操作：
+  // currentTime 冻结、指示器跟着冻住，而 state.paused 还说是"在跑" ——
+  // 仪器看着活着其实已经死了，只能刷新。对一个全靠读数可信的工具，这是最坏的失效方式。
+  function resume() {
+    if (!ctx) return;
+    if (ctx.state === 'running' || ctx.state === 'closed') return;
+    try {
+      const p = ctx.resume();
+      // WebKit 在刚被打断之后可能拒绝这次恢复；吞掉的话故障又会变成静默的
+      if (p && p.catch) p.catch(function () {});
+    } catch (e) { /* 某些 WebKit 版本在这里同步抛 */ }
+  }
 
   SDT.audio = {
     TONES: TONES,
@@ -1426,7 +1503,7 @@ Expected: 新增 2 个用例 `FAIL`，错误是 `Cannot read properties of undef
 - [ ] **Step 4: 运行测试，确认全绿**
 
 Run: `node tools/run-tests.js`
-Expected: 32 × `  ok  <name>`，最后一行 `32 passed, 0 failed`，退出码 0。
+Expected: 33 × `  ok  <name>`，最后一行 `33 passed, 0 failed`，退出码 0。
 
 `tools/run-tests.js` 的 `APP_SCRIPTS` 里已经包含 `audio.js`，所以这一步顺带验证了它能在裸 vm 里求值。
 
@@ -1702,9 +1779,15 @@ git commit -m "Add indicator rendering driven by the audio clock"
     window.addEventListener('pointerup', endHold);
     window.addEventListener('pointercancel', endHold);
 
+    // 归零走 restart() 而不是 applyDelay(0)：延迟一次跳太多时，
+    // 过渡那一拍的旧音和新音可能落在几十毫秒内 —— 两个起音挤在一起，
+    // 恰好污染了这个应用要测量的那个量。重启会先取消所有已排音频并重新起一轮
+    // （1.1s 的前导足够任何在响的音收尾），顺带"从左边重新开始"也更贴合"归零"的语义。
     document.getElementById('reset-btn').addEventListener('click', function () {
       endHold();
-      applyDelay(0);
+      state.delay = 0;
+      renderReadout();
+      if (state.running) restart();
     });
 
     // 桌面键盘：← → 调 1ms，Shift + ← → 调 10ms
@@ -1907,7 +1990,7 @@ git commit -m "Wire up start, pause, language switching and the lookahead schedu
 - [ ] **Step 6: 全流程人工验收**
 
 Run: `node tools/run-tests.js`
-Expected: `32 passed, 0 failed`。
+Expected: `33 passed, 0 failed`。
 
 然后起一个本地静态服务（`file://` 下 `AudioContext` 可用，但用 `http://` 更接近真实环境）：
 
@@ -1971,7 +2054,7 @@ git commit --allow-empty -m "Verify end-to-end manual acceptance checklist"
 </head>
 <body>
 <h1>自检 / Self-test</h1>
-<p class="sub">纯逻辑部分。需要真实耳机和真实硬件的部分见设计文档 §12 的人工清单。</p>
+<p class="sub">纯逻辑与音频记账部分。真正需要音频硬件和真实耳机的部分见设计文档 §12 的人工清单。</p>
 <div id="results"></div>
 <div id="summary"></div>
 
@@ -1987,6 +2070,7 @@ git commit --allow-empty -m "Verify end-to-end manual acceptance checklist"
 </script>
 <script src="i18n.js"></script>
 <script src="timing.js"></script>
+<script src="audio.js"></script>
 <script src="tests.js"></script>
 <script>
   (function () {
@@ -2017,10 +2101,10 @@ git commit --allow-empty -m "Verify end-to-end manual acceptance checklist"
 - [ ] **Step 2: 验证浏览器与 Node 结果一致**
 
 Run: `node tools/run-tests.js`
-Expected: `32 passed, 0 failed`
+Expected: `33 passed, 0 failed`
 
 打开 `http://localhost:8000/tests.html`（用 Task 7 起的服务）。
-Expected: 页面底部 `32 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
+Expected: 页面底部 `33 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
 
 - [ ] **Step 3: 提交**
 
@@ -2103,7 +2187,7 @@ node tools/run-tests.js
 git status --short
 ```
 
-Expected: `32 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
+Expected: `33 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
 
 - [ ] **Step 4: 提交**
 
