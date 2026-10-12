@@ -1478,7 +1478,10 @@ Expected: 新增 2 个用例 `FAIL`，错误是 `Cannot read properties of undef
     if (ctx.state === 'running' || ctx.state === 'closed') return;
     try {
       const p = ctx.resume();
-      // WebKit 在刚被打断之后可能拒绝这次恢复；吞掉的话故障又会变成静默的
+      // 这里吞掉拒绝，只是为了不让它变成未处理的 promise rejection ——
+      // 并不是说失败可以不管。允许调用了不等于真的恢复了：WebKit 在刚被打断之后
+      // 有可能拒绝。所以真正的兜底在调用方：Task 7 切回前台时会复查 state()，
+      // 不恢复就把话说出来，而不是让仪器静默地假活。
       if (p && p.catch) p.catch(function () {});
     } catch (e) { /* 某些 WebKit 版本在这里同步抛 */ }
   }
@@ -1504,6 +1507,8 @@ Expected: 新增 2 个用例 `FAIL`，错误是 `Cannot read properties of undef
 
 Run: `node tools/run-tests.js`
 Expected: 33 × `  ok  <name>`，最后一行 `33 passed, 0 failed`，退出码 0。
+
+注意最后那条 `audio 记账` 用例在补丁前后都是绿的 —— 原来的 `cancelPending` 本来就用了严格的 `>`。它是**钉住既有行为**的测试，不是红绿循环。它的价值要靠变异测试来确认：把 `p.time > cutoff` 改成 `>=`，它必须失败。
 
 `tools/run-tests.js` 的 `APP_SCRIPTS` 里已经包含 `audio.js`，所以这一步顺带验证了它能在裸 vm 里求值。
 
@@ -2008,6 +2013,7 @@ python3 -m http.server 8000
 6. 切到别的标签页再切回来 → 音画仍然同步（网页保持运行的前提下），并且**不会听到一串挤在一起的连响**（后台标签页的定时器被节流到约 1 秒一次，是这条路径最容易暴露的场景）。回来后音频会稀疏一阵再重新对齐到视觉网格上 —— 这是预期行为，不是故障
 7. 点「中/EN」→ 全部文案（含底部两行小字）立即切换，**标签页标题也跟着变**（它靠 `<title data-i18n="app.title">`，容易被漏看），刷新后仍是上次选的语言
 8. 手机 Chrome、iOS Safari 各走一遍上述流程；iOS 上确认静音拨片打开时仍有声
+9. **iOS 实测音频打断**：播放中锁屏再解锁，或触发一次来电/Siri，然后切回页面 —— 声音和动效必须都恢复。这是设计文档 §11 记的那条残余风险：`resume()` 现在会尝试恢复，但 WebKit 允许调用不等于真的成功。若回来之后指示器还在动、数字却不再跟随节奏（或干脆冻住），就是中招了 —— 那时要加一条明确的"请重新加载"提示，别让用户对着一个假活的仪器读数
 
 - [ ] **Step 7: 提交验收记录**
 
