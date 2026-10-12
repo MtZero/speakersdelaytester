@@ -144,7 +144,7 @@ body {
 }
 .stage { position: relative; height: var(--stage-h); }
 
-/* 点：位置由 JS 写 left，垂直靠负 margin 居中在 19% 这条线上。
+/* 点：位置由 JS 写 left，垂直靠负 margin 居中在 --dot-y 这条线上。
    transform 留给 JS 做缩放脉冲，不参与定位。 */
 .dot {
   --d: var(--dot-size);
