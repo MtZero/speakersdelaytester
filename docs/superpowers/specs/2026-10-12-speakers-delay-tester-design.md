@@ -1,0 +1,294 @@
+# 无线耳机延迟测试器 — 设计文档
+
+日期：2026-10-12
+
+## 1. 目标
+
+一个纯静态网页，用来测无线耳机（蓝牙/TWS）的音频延迟。
+
+原理：页面按固定节奏播放"滴嗒嗒哒"四声，同时有一个固定不动的视觉指示器。用户调整一个"提前量"，让声音比视觉指示器**提前**若干毫秒发出；当听觉与视觉完全重合时，这个提前量就等于耳机加上设备音频通路的延迟。
+
+**不依赖任何外部库、构建工具或网络资源。** 目录下现有的 `index.html` / `app.js` / `app.css` 是早期原型，全部重写。
+
+## 2. 已确认的设计决策
+
+这些决策是在浏览器里用可交互原型逐项确认过的，原型保存在 `.superpowers/brainstorm/`（已加入 `.gitignore`）。
+
+| 项目 | 决定 | 理由 |
+|---|---|---|
+| 拍间隔 | 500ms | 用户试过 300ms 后改为 500ms；由常量控制，并预留用户可调位置但暂不开放 |
+| 音色 | 丙：3ms 陡峭起音 + 指数衰减，时长 50ms，滴 1600Hz / 嗒 1100Hz | 延迟测试靠的是**起音瞬态**。余弦窗虽然短，但起音被抹圆，听感上的"时刻"会往后飘十几毫秒 —— 正是我们要测的量级 |
+| 视觉指示器 | 甲：5 段时间轴 + 4 个点，扫描头在段 5 与段 1 之间重叠接力，永不回跳 | 离散点提供锐利的闪光上升沿（眼睛抓这个），连续扫描头提供方向感 |
+| 调整面板 | 甲：一排四键 `−10 / −1 / +1 / +10`，支持长按连发加速 | 手机上最省纵向空间，拇指不用移动 |
+| 延迟量程 | 0 – 500ms | 见 §5.4，量程必须小于一拍 |
+
+## 3. 文件结构
+
+```
+index.html      仅结构，无逻辑
+styles.css      全部样式 + 响应式断点
+i18n.js         文案表 + t() + 语言检测与切换
+audio.js        AudioContext 生命周期、音色合成、前瞻调度器
+app.js          拍时钟、指示器渲染、控件接线、总装
+tests.html      零依赖自检页（见 §12）
+```
+
+- 用普通 `<script src>`，**不用 ES module** —— module 在 `file://` 下会被 CORS 拦掉，普通 script 则能直接双击 `index.html` 打开。
+- 每个文件只挂一个全局命名空间成员：`window.SDT = window.SDT || {}`，各自挂 `SDT.i18n` / `SDT.audio` / `SDT.app`。
+- 加载顺序：`i18n.js` → `audio.js` → `app.js`，`app.js` 在 `DOMContentLoaded` 上初始化。
+
+## 4. 常量与配置
+
+集中定义在 `app.js` 顶部，**所有时间量都用毫秒**，只有交给 Web Audio API 时才除以 1000。
+
+```
+BEAT_MS   = 500     // 相邻两拍间隔
+BEATS     = 4       // 每轮拍数：滴·嗒·嗒·哒
+CYCLE_MS  = BEAT_MS * BEATS      // 2000，一轮时长
+SEGMENTS  = 5       // 时间轴段数
+SWEEP_MS  = BEAT_MS * SEGMENTS   // 2500，扫描头走完全程的时长
+DELAY_MIN = 0
+DELAY_MAX = BEAT_MS              // 500，见 §5.4
+STEP_FINE   = 1
+STEP_COARSE = 10
+START_LEAD_MS = DELAY_MAX + 600  // 1100，启动时留给调度器的提前量
+LOOKAHEAD_MS  = 120              // 音频前瞻调度窗口
+TIMER_MS      = 25               // 调度器轮询间隔
+```
+
+### 4.1 预留的间隔调节位
+
+`index.html` 里有一个 `<div id="interval-slot" hidden>`，内含一个 `<input type="number" min="200" max="1000" step="50">`，用于调整 `BEAT_MS`。**当前隐藏、不对用户开放**，但接线是通的：改变 `BEAT_MS` 时必须联动重算 `CYCLE_MS`、`SWEEP_MS`、`DELAY_MAX`、`START_LEAD_MS`，重新钳制当前延迟值，并以新参数重启时钟。
+
+## 5. 时钟与调度（核心）
+
+### 5.1 主时钟
+
+**以 `AudioContext.currentTime` 作为唯一主时钟**，视觉也由它驱动。这样音频调度（采样级精确）和视觉渲染共享同一个时间源，页面被切到后台再回来时不需要重新对齐。
+
+`originTime` = 视觉时间轴 `t = 0` 对应的 `ctx.currentTime`。启动时设为 `ctx.currentTime + START_LEAD_MS/1000`。
+
+### 5.2 拍与时间点
+
+拍索引 `n` 从 0 开始递增，永不复位。第 `n` 拍的**音高**由 `n mod 4` 决定（0 = 滴，1/2/3 = 嗒）。
+
+```
+t(n)         = (n + 1) * BEAT_MS          // 相对 originTime 的视觉时刻
+visualTime(n)= originTime + t(n)
+audioTime(n) = originTime + t(n) - delay  // 延迟只移动音频
+```
+
+`t(n)` 从 `(n+1)*BEAT_MS` 而不是 `n*BEAT_MS` 起算，是为了让 **`t ∈ [0, BEAT_MS)` 这段成为时间轴最左侧那段留白** —— 扫描头从 0% 出发跑向第一个点，此时还没有任何一拍发生。这正是用户要的"最左侧新增一段空白"。
+
+### 5.3 音频前瞻调度
+
+绝对不能用一个定时器到点了才发声 —— 移动端 `setTimeout` 抖动可达几十毫秒，比要测的量级还大。必须提前把音频**排进 AudioContext 的采样级时间轴**：
+
+```
+每 TIMER_MS 轮询一次：
+  while (audioTime(nextIndex) < ctx.currentTime + LOOKAHEAD_MS/1000) {
+      把第 nextIndex 拍排进队列：src.start(audioTime(nextIndex))
+      nextIndex++
+  }
+```
+
+`src.start(t)` 里的 `t` 是 `ctx.currentTime` 时间轴上的绝对时刻，由音频硬件线程负责精确触发，不受主线程卡顿影响。
+
+### 5.4 延迟改变时的即时响应
+
+已排进队列的音频无法改期，所以改延迟时要：
+
+1. 取消所有**尚未开始播放**的已排音频（`audioTime > ctx.currentTime + 0.005` 的，调用 `src.stop()`；已经开始播的不动 —— 音长只有 50ms，让它自然结束，避免爆音）。
+2. 重算下一个待排拍号：
+
+```
+X = (ctx.currentTime + SAFETY - originTime + delay) / BEAT
+nextIndex = max(0, floor(X))        // SAFETY = 0.02 秒
+```
+
+这样用户按下按钮的**下一拍**就是新延迟，手感是即时的。
+
+### 5.5 为什么量程必须小于一拍
+
+延迟 `d` 与 `d + BEAT_MS` 会让声音整整错开一拍，落在下一个点上 —— 视觉上同样是一次"重合"。虽然"滴"的点在视觉上更大、颜色不同，用户通常能看出不对，但这是个应当避免的假锁定。因此 `DELAY_MAX = BEAT_MS`。
+
+500ms 已能覆盖最差的蓝牙耳机（SBC 编码、无低延迟模式约 150–300ms）。下限 0 不能为负：不戴耳机时设备本机延迟通常在 10–40ms，所以在 0 附近调不到位是正常的。
+
+上限设为 500 而非 499 是有意为之：`delay == BEAT_MS` 时音高图案会错位到错误的点上（滴落在嗒的点上），是**视觉上明显错误**的状态，不会和 `delay == 0` 混淆。
+
+### 5.6 暂停
+
+暂停直接调 `ctx.suspend()`，继续调 `ctx.resume()`。因为 `ctx.currentTime` 在挂起期间冻结，恢复后一切自动接上，不需要任何补偿计算。
+
+页面切后台/回前台时同样只做 `ctx.resume()`：主时钟没断，音频与视觉仍然一致，不需要重新对齐。
+
+## 6. 音频引擎（`audio.js`）
+
+### 6.1 音色
+
+两个音一次渲染成 `AudioBuffer` 缓存起来（波形是固定的，不必每次重新算）：
+
+```
+滴：1600 Hz      嗒：1100 Hz
+时长：50ms
+包络：3ms 线性起音 × exp(-i / (sr * 0.012))，末端再乘 2ms 线性归零
+峰值增益：0.60
+```
+
+3ms 起音给出锐利的瞬态（听感上的时间锚点），末端 2ms 归零保证首尾都是 0，杜绝爆音。
+
+### 6.2 上下文生命周期
+
+- 首次创建：`window.AudioContext || window.webkitAudioContext`，同时建一个总 `GainNode` 接到 destination。
+- 若 `navigator.audioSession` 存在（iOS 16.4+），设 `navigator.audioSession.type = 'playback'`，否则 iPhone 的静音拨片会让 Web Audio 完全没声。
+- 创建/恢复必须在用户手势里调用 —— 这就是启动遮罩存在的唯一原因。
+- 不支持 AudioContext 时在遮罩上给出提示文案（`error.noAudio`）。
+
+## 7. 视觉指示器
+
+渲染在 `requestAnimationFrame` 里，由 `t = ctx.currentTime - originTime` 驱动。
+
+### 7.1 布局
+
+5 段等分的时间轴，4 个分隔线落在 20% / 40% / 60% / 80%；4 个点钉在分隔线正上方。第 0 个点（滴）更大、暖琥珀色；另外 3 个冷青色。
+
+### 7.2 点与刻度
+
+第 `i` 个点在 `t ≡ BEAT_MS * (i + 1) (mod CYCLE_MS)` 时闪亮，包络 `exp(-age / 70ms)`。同一位置的刻度同步闪亮（同一个事件，不会造成歧义）。颜色走同一套：`i == 0` 暖色，其余冷色。
+
+### 7.3 扫描头（甲方案：重叠接力）
+
+第 `k` 个扫描头在 `t = k * CYCLE_MS` 出发，历时 `SWEEP_MS` 从 0% 走到 100%，位置 `= (t - k*CYCLE_MS) / SWEEP_MS`。因为 `SWEEP_MS (2500) > CYCLE_MS (2000)`，任意时刻**最多同时存在 2 个扫描头**，重叠 500ms。
+
+活跃扫描头的起算：
+
+```
+k0 = max(0, floor((t - SWEEP_MS) / CYCLE_MS) + 1)
+```
+
+透明度：前 170ms 淡入、后 190ms 淡出 —— 左边那个淡入、右边那个淡出，视线自然从段 5 交接到段 1，全程没有跳变。
+
+同屏最多 2 个扫描头，DOM 里预备 3 个 `.needle` 元素循环复用即可。
+
+### 7.4 时间轴的语义
+
+- 段 1（0–20%）：留白。扫描头在这里跑向第一个点，此时无声。
+- 段 2–5（20–80%）：四拍依次发生。
+- 段 5 与下一轮的段 1 在时间上重叠 500ms。
+- 读秒永不回跳。
+
+## 8. 控件与交互
+
+### 8.1 布局
+
+```
+┌─ 顶栏：标题 · 中/EN · ❙❙ 暂停 ─┐
+│   指示器（四点 + 时间轴）        │
+│            120 ms              │
+│   [−10]  [−1]  [+1]  [+10]     │
+│         [  归零  ]              │
+│  戴上耳机，把"滴嗒嗒哒"调到…     │
+└────────────────────────────────┘
+```
+
+指示器在上，延迟数值在其下（最大字号），四键再下。
+
+### 8.2 长按连发
+
+`pointerdown` 立刻走一步，按住 380ms 后开始连发，连发间隔随按住时长递减：110ms → 70ms（>0.8s）→ 40ms（>1.4s）→ 24ms（>2.2s）。这样 10ms 档从 0 到 200ms 约 1 秒。
+
+实现要点：
+- 用 Pointer Events，同时覆盖鼠标、触摸、手写笔。
+- 释放监听到 `window` 上（不是按钮上），手指滑出按钮再松开也能停。
+- 按钮 `touch-action: manipulation` + `user-select: none`，`pointerdown` 里 `preventDefault()` 阻止长按选中和双击缩放。
+
+### 8.3 键盘（桌面）
+
+`←` / `→` = ∓1ms，`Shift + ←/→` = ∓10ms。仅在焦点不在输入框时生效。
+
+### 8.4 边界
+
+延迟钳制在 `[DELAY_MIN, DELAY_MAX]`。"归零"按钮一键回到 0。
+
+### 8.5 视觉令牌
+
+单一深色主题，不做浅色模式（所有已确认的原型都是深色）。
+
+| 用途 | 值 |
+|---|---|
+| 页面背景 | `#0d1117` |
+| 指示器面板 | `#131a24` |
+| 时间轴底槽 | `#1b2431` |
+| 按钮底 / 边框 / 按下 | `#1b2431` / `#2c3949` / `#2f4055` |
+| 主文字 / 次要 / 弱 | `#eaf2fb` / `#7d8899` / `#5b6675` |
+| 滴（暖） | `rgb(255, 209, 102)` |
+| 嗒（冷） | `rgb(76, 201, 240)` |
+| 扫描头 | `#eaf2fb` + 外发光 |
+
+点、刻度、按下的按钮都用 `rgba()` 叠同一个色相，靠透明度做亮灭，不要为每个状态单独调色。
+
+### 8.6 底部提示
+
+底部提示区两行：第一行是操作指引，第二行是更小更暗的限制说明（内容见 §9.1 的 `hint` 与 `caveat`）。
+
+> 这一行是在已确认的原型基础上**追加**的 —— 原型底部只有一行指引。测得的值含设备自身延迟这件事如果不说，用户会把它当成绝对真值。
+
+## 9. 多语种（`i18n.js`）
+
+- 文案表就是一个对象：`{ zh: {...}, en: {...} }`，**加一门语言 = 加一个键**。
+- DOM 用 `data-i18n="key"` 标注；切换语言时遍历 `[data-i18n]` 写 `textContent`，同时更新 `<html lang>` 和 `document.title`。
+- 语言解析顺序：`localStorage.sdt.lang` → `navigator.language` 以 `zh` 开头则 `zh`，否则 `en`。localStorage 访问包在 try/catch 里（隐私模式下会抛异常）。
+- 顶栏一个「中 / EN」切换按钮。
+
+需要的键：`app.title`、`start.title`、`start.subtitle`、`start.button`、`controls.reset`、`controls.pause`、`controls.resume`、`hint`、`caveat`、`error.noAudio`。
+
+### 9.1 文案表
+
+| key | zh | en |
+|---|---|---|
+| `app.title` | 延迟测试 | Latency Test |
+| `start.title` | 戴上耳机，点击开始 | Put on your headphones |
+| `start.subtitle` | 把"滴嗒嗒哒"调到与闪动的点完全重合 | Adjust the beat until it lines up with the flashing dots |
+| `start.button` | 开始 | Start |
+| `controls.reset` | 归零 | Reset |
+| `controls.pause` | 暂停 | Pause |
+| `controls.resume` | 继续 | Resume |
+| `hint` | 戴上耳机，把"滴嗒嗒哒"调到与闪动的点完全重合 | Wear your headphones and adjust until the beat lines up with the dots |
+| `caveat` | 读数还包含设备自身的音频与显示延迟（通常 10–40ms），适合横向比较耳机，不是实验室级绝对值 | Includes your device's own audio and display latency (typically 10–40 ms) — good for comparing headphones, not a lab-grade figure |
+| `error.noAudio` | 当前浏览器不支持 Web Audio，无法运行 | This browser does not support Web Audio |
+
+## 10. 响应式与兼容性
+
+- 手机竖屏是基准形态；容器 `max-width: 520px` 居中，宽屏下**不拉宽**。
+- 指示器尺寸、字号、按钮高度用 CSS 变量 + `clamp()` 随视口伸缩。宽屏下限制指示器宽度很重要 —— 拉得太长，扫描头跑得飞快，眼睛反而抓不住。
+- 目标：桌面 Chrome/Edge、Android Chrome、iOS Safari（14+），平板横竖屏均可用。
+- 不使用任何需要 https 或权限的 API（不碰 `getUserMedia`、不做联网请求）。
+
+## 11. 已知限制（必须在文档里写清楚）
+
+测得的值 ≈ **耳机延迟 + 设备音频输出延迟 + 显示通路延迟**。后两项在手机上通常合计 10–40ms，且不同设备不同。所以：
+
+- 这个数字适合**横向比较**不同耳机、判断低延迟/游戏模式有没有生效；
+- 不适合当作实验室级绝对值；
+- 不戴耳机时读数接近 0 但不会是 0，这是正常的；
+- 无法测量设备自身扬声器的延迟（那是基准，不是被测对象）。
+
+## 12. 测试
+
+不用任何测试框架（框架本身就是外部依赖）。`tests.html` 是一个零依赖自检页，内联十几行 `assert`，覆盖不依赖浏览器音频硬件的**纯逻辑**：
+
+- 拍索引 → 视觉时刻 / 音频时刻的换算（§5.2）
+- `nextIndex` 反算函数（§5.4）在各边界下的取值
+- 延迟钳制（0 / 500 / 越界 / 负值）
+- 扫描头活跃区间与位置计算（§7.3），含 `t` 跨多轮的情况
+- `zh` 与 `en` 文案表的键集合完全一致
+
+需要真实耳机和真实硬件才能验证的部分，走人工清单：iOS Safari 静音拨片下是否有声、Android Chrome 长按连发是否触发页面缩放、切换前后台后音画是否仍然同步、切语言是否即时生效、0 和 500 边界是否钳得住。
+
+## 13. 明确不做（YAGNI）
+
+- 不保存/导出历史测量结果 —— 需求里"测试结果"就是屏幕上那个数字。
+- 不做自动对齐、不做听感统计。
+- 不做耳机型号数据库。
+- 不引入 Service Worker、PWA、离线缓存。
+- 不把 `BEAT_MS` 的用户调节界面放出来（位置预留，见 §4.1）。
