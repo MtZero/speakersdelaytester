@@ -6,7 +6,7 @@
 
 一个纯静态网页，用来测无线耳机（蓝牙/TWS）的音频延迟。
 
-原理：页面按固定节奏播放"滴嗒嗒哒"四声，同时有一个固定不动的视觉指示器。用户调整一个"提前量"，让声音比视觉指示器**提前**若干毫秒发出；当听觉与视觉完全重合时，这个提前量就等于耳机加上设备音频通路的延迟。
+原理：页面按固定节奏播放“滴嗒嗒哒”四声，同时有一个固定不动的视觉指示器。用户调整一个"提前量"，让声音比视觉指示器**提前**若干毫秒发出；当听觉与视觉完全重合时，这个提前量就等于耳机加上设备音频通路的延迟。
 
 **不依赖任何外部库、构建工具或网络资源。** 目录下现有的 `index.html` / `app.js` / `app.css` 是早期原型，全部重写。
 
@@ -48,7 +48,7 @@ tools/run-tests.js Node 运行器（开发用，不部署）
 
 ```
 BEAT_MS   = 500     // 相邻两拍间隔
-BEATS     = 4       // 每轮拍数：滴·嗒·嗒·哒
+BEATS     = 4       // 每轮拍数：滴嗒嗒哒
 CYCLE_MS  = BEAT_MS * BEATS      // 2000，一轮时长
 SEGMENTS  = 5       // 时间轴段数
 SWEEP_MS  = BEAT_MS * SEGMENTS   // 2500，扫描头走完全程的时长
@@ -136,7 +136,7 @@ nextIndex = max(base, floor)
 
 延迟 `d` 与 `d + BEAT_MS` 会让声音整整错开一拍，落在下一个点上 —— 视觉上同样是一次"重合"。虽然"滴"的点在视觉上更大、颜色不同，用户通常能看出不对，但这是个应当避免的假锁定。因此 `DELAY_MAX = BEAT_MS`。
 
-500ms 已能覆盖最差的蓝牙耳机（SBC 编码、无低延迟模式约 150–300ms）。下限 0 不能为负：不戴耳机时设备本机延迟通常在 10–40ms，所以在 0 附近调不到位是正常的。
+500ms 已能覆盖最差的蓝牙耳机（SBC 编码、无低延迟模式约 150–300ms）。下限 0 不能为负：不戴耳机时设备本机延迟通常在 10–40 ms，所以在 0 附近调不到位是正常的。
 
 上限设为 500 而非 499 是有意为之：`delay == BEAT_MS` 时音高图案会错位到错误的点上（滴落在嗒的点上），是**视觉上明显错误**的状态，不会和 `delay == 0` 混淆。
 
@@ -211,7 +211,7 @@ k0 = max(0, floor((t - SWEEP_MS) / CYCLE_MS) + 1)
 │            120 ms              │
 │   [−10]  [−1]  [+1]  [+10]     │
 │         [  归零  ]              │
-│  戴上耳机，把"滴嗒嗒哒"调到…     │
+│  戴上耳机，把“滴嗒嗒哒”调到…     │
 └────────────────────────────────┘
 ```
 
@@ -260,7 +260,8 @@ k0 = max(0, floor((t - SWEEP_MS) / CYCLE_MS) + 1)
 ## 9. 多语种（`i18n.js`）
 
 - 文案表就是一个对象：`{ zh: {...}, en: {...} }`，**加一门语言 = 加一个键**。
-- DOM 用 `data-i18n="key"` 标注；切换语言时遍历 `[data-i18n]` 写 `textContent`，同时更新 `<html lang>` 和 `document.title`。
+- DOM 用 `data-i18n="key"` 标注；切换语言时遍历 `[data-i18n]` 写 `textContent`。
+- **标签页标题也挂 `data-i18n`**：`document.querySelectorAll` 会遍历到 `<head>`，所以 `apply(lang, document)` 顺手就把 `<title>` 本地化了，不需要在 `app.js` 里为它写特例。`<html lang>` 则由 `setLang` 单独更新（它不是文案，是语言标记）。
 - 语言解析顺序：`localStorage.sdt.lang` → `navigator.language` 以 `zh` 开头则 `zh`，否则 `en`。localStorage 访问包在 try/catch 里（隐私模式下会抛异常）。
 - 顶栏一个「中 / EN」切换按钮。
 
@@ -272,13 +273,13 @@ k0 = max(0, floor((t - SWEEP_MS) / CYCLE_MS) + 1)
 |---|---|---|
 | `app.title` | 延迟测试 | Latency Test |
 | `start.title` | 戴上耳机，点击开始 | Put on your headphones |
-| `start.subtitle` | 把"滴嗒嗒哒"调到与闪动的点完全重合 | Adjust the beat until it lines up with the flashing dots |
+| `start.subtitle` | 把“滴嗒嗒哒”调到与闪动的点完全重合 | Adjust the beat until it lines up with the flashing dots |
 | `start.button` | 开始 | Start |
 | `controls.reset` | 归零 | Reset |
 | `controls.pause` | 暂停 | Pause |
 | `controls.resume` | 继续 | Resume |
-| `hint` | 戴上耳机，把"滴嗒嗒哒"调到与闪动的点完全重合 | Wear your headphones and adjust until the beat lines up with the dots |
-| `caveat` | 读数还包含设备自身的音频与显示延迟（通常 10–40ms），适合横向比较耳机，不是实验室级绝对值 | Includes your device's own audio and display latency (typically 10–40 ms) — good for comparing headphones, not a lab-grade figure |
+| `hint` | 戴上耳机，把“滴嗒嗒哒”调到与闪动的点完全重合 | Wear your headphones and adjust until the beat lines up with the dots |
+| `caveat` | 读数还包含设备自身的音频与显示延迟（通常 10–40 ms），适合横向比较耳机，不是实验室级绝对值 | Includes your device's own audio and display latency (typically 10–40 ms) — good for comparing headphones, not a lab-grade figure |
 | `error.noAudio` | 当前浏览器不支持 Web Audio，无法运行 | This browser does not support Web Audio |
 
 ## 10. 响应式与兼容性
@@ -290,7 +291,7 @@ k0 = max(0, floor((t - SWEEP_MS) / CYCLE_MS) + 1)
 
 ## 11. 已知限制（必须在文档里写清楚）
 
-测得的值 ≈ **耳机延迟 + 设备音频输出延迟 + 显示通路延迟**。后两项在手机上通常合计 10–40ms，且不同设备不同。所以：
+测得的值 ≈ **耳机延迟 + 设备音频输出延迟 + 显示通路延迟**。后两项在手机上通常合计 10–40 ms，且不同设备不同。所以：
 
 - 这个数字适合**横向比较**不同耳机、判断低延迟/游戏模式有没有生效；
 - 不适合当作实验室级绝对值；

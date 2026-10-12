@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** 用纯静态网页测出蓝牙耳机的音频延迟 —— 页面按固定节奏播放"滴嗒嗒哒"，用户调整提前量直到听觉与视觉指示器重合。
+**Goal:** 用纯静态网页测出蓝牙耳机的音频延迟 —— 页面按固定节奏播放“滴嗒嗒哒”，用户调整提前量直到听觉与视觉指示器重合。
 
 **Architecture:** 以 `AudioContext.currentTime` 为唯一主时钟，音频用前瞻调度器排进音频硬件的采样级时间轴，视觉指示器用 `requestAnimationFrame` 读同一个时钟渲染。所有不碰 DOM 和音频硬件的计时数学抽到一个纯函数模块里，这样它既能在浏览器里测、也能在 Node 里测。
 
@@ -601,14 +601,37 @@ git commit -m "Add pure timing math with a zero-dependency test runner"
 ```js
   // ─────────── 多语种 ───────────
 
-  run('i18n: 中英文案表的键完全一致', function () {
-    const zh = Object.keys(SDT.i18n.strings.zh).sort();
-    const en = Object.keys(SDT.i18n.strings.en).sort();
-    eq(zh.join(','), en.join(','), 'zh 与 en 的键集合');
-    for (const k of zh) {
-      if (!SDT.i18n.strings.zh[k]) throw new Error('zh.' + k + ' 是空的');
-      if (!SDT.i18n.strings.en[k]) throw new Error('en.' + k + ' 是空的');
+  // 遍历文案表本身，而不是写死 zh / en —— 否则加第三门语言时，
+  // 一条漏了键的新表会安静地通过，而 README 却向用户承诺这条检查覆盖"所有语言"。
+  run('i18n: 所有语言的键集合完全一致，且没有空串', function () {
+    const langs = Object.keys(SDT.i18n.strings);
+    eq(langs.length >= 2, true, '至少要两种语言，当前 ' + langs.length);
+    eq(typeof SDT.i18n.strings[SDT.i18n.FALLBACK], 'object',
+       'FALLBACK (' + SDT.i18n.FALLBACK + ') 必须真的在文案表里');
+
+    const reference = langs[0];
+    const expected = Object.keys(SDT.i18n.strings[reference]).sort().join(',');
+    for (const lang of langs) {
+      const table = SDT.i18n.strings[lang];
+      eq(Object.keys(table).sort().join(','), expected,
+         lang + ' 的键集合应当与 ' + reference + ' 一致');
+      for (const k of Object.keys(table)) {
+        if (!table[k]) throw new Error(lang + '.' + k + ' 是空的');
+      }
     }
+  });
+
+  // apply() 是唯一把文案真正写到屏幕上的函数，而它本身没有分支
+  // （查表的逻辑在上面的 t() 里）。用一个假节点就能在无 DOM 的环境里钉住它。
+  run('i18n.apply: 把文案写进 [data-i18n] 节点，缺键回落成键名', function () {
+    const nodes = [
+      { textContent: null, getAttribute: function () { return 'app.title'; } },
+      { textContent: null, getAttribute: function () { return 'nope.missing'; } }
+    ];
+    const fakeRoot = { querySelectorAll: function (sel) { return sel === '[data-i18n]' ? nodes : []; } };
+    SDT.i18n.apply('zh', fakeRoot);
+    eq(nodes[0].textContent, '延迟测试');
+    eq(nodes[1].textContent, 'nope.missing');
   });
 
   run('i18n.resolve: 用户选过的语言优先', function () {
@@ -643,7 +666,7 @@ git commit -m "Add pure timing math with a zero-dependency test runner"
 - [ ] **Step 2: 运行测试，确认失败**
 
 Run: `node tools/run-tests.js`
-Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undefined (reading 'strings')`；原有 24 个仍 `ok`。
+Expected: 新增 6 个用例 `FAIL`，错误是 `Cannot read properties of undefined (reading 'strings')`；原有 24 个仍 `ok`。
 
 - [ ] **Step 3: 实现 `i18n.js`**
 
@@ -660,13 +683,13 @@ Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undef
     zh: {
       'app.title': '延迟测试',
       'start.title': '戴上耳机，点击开始',
-      'start.subtitle': '把"滴嗒嗒哒"调到与闪动的点完全重合',
+      'start.subtitle': '把“滴嗒嗒哒”调到与闪动的点完全重合',
       'start.button': '开始',
       'controls.reset': '归零',
       'controls.pause': '暂停',
       'controls.resume': '继续',
-      'hint': '戴上耳机，把"滴嗒嗒哒"调到与闪动的点完全重合',
-      'caveat': '读数还包含设备自身的音频与显示延迟（通常 10–40ms），适合横向比较耳机，不是实验室级绝对值',
+      'hint': '戴上耳机，把“滴嗒嗒哒”调到与闪动的点完全重合',
+      'caveat': '读数还包含设备自身的音频与显示延迟（通常 10–40 ms），适合横向比较耳机，不是实验室级绝对值',
       'error.noAudio': '当前浏览器不支持 Web Audio，无法运行'
     },
     en: {
@@ -685,16 +708,26 @@ Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undef
 
   const FALLBACK = 'en';
 
-  // 纯函数：用户选过的优先，其次看浏览器语言，中文只认 zh 开头
+  // 语言身份以文案表为准，这两个函数里不写死任何语言代码 ——
+  // 加一门语言 = 往 strings 里加一条，不需要回来改逻辑。
+  // 顺带避免 strings['constructor'] 这类原型链上的键被当成"有这门语言"。
+  function hasLanguage(code) {
+    return typeof code === 'string' && Object.prototype.hasOwnProperty.call(strings, code);
+  }
+
+  // 纯函数：用户选过的优先，其次看浏览器语言的前两位
   function resolve(stored, navLang) {
-    if (stored === 'zh' || stored === 'en') return stored;
-    if (typeof navLang === 'string' && navLang.slice(0, 2).toLowerCase() === 'zh') return 'zh';
+    if (hasLanguage(stored)) return stored;
+    if (typeof navLang === 'string') {
+      const code = navLang.slice(0, 2).toLowerCase();
+      if (hasLanguage(code)) return code;
+    }
     return FALLBACK;
   }
 
   // 纯函数：语言不存在时回落到 en；键不存在时回落到键名本身（比 undefined 好排查）
   function t(key, lang) {
-    const table = strings[lang] || strings[FALLBACK];
+    const table = hasLanguage(lang) ? strings[lang] : strings[FALLBACK];
     const value = table[key];
     if (value !== undefined) return value;
     const fallback = strings[FALLBACK][key];
@@ -736,7 +769,7 @@ Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undef
 - [ ] **Step 4: 运行测试，确认全绿**
 
 Run: `node tools/run-tests.js`
-Expected: `29 passed, 0 failed`。
+Expected: `30 passed, 0 failed`。
 
 - [ ] **Step 5: 提交**
 
@@ -764,7 +797,9 @@ git commit -m "Add bilingual string table with language resolution"
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <meta name="color-scheme" content="dark">
-<title>延迟测试</title>
+<!-- 标签页标题也走 data-i18n：document.querySelectorAll 会遍历到 <head>，
+     所以 app.js 里那句 apply(lang, document) 顺手就把它本地化了，不需要额外代码 -->
+<title data-i18n="app.title">延迟测试</title>
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
@@ -1235,7 +1270,7 @@ git commit -m "Add page skeleton and styles"
 `tools/run-tests.js` 的 `APP_SCRIPTS` 里已经包含 `audio.js`，所以这一步顺带验证了它能在裸 vm 里求值。
 
 Run: `node tools/run-tests.js`
-Expected: `29 passed, 0 failed`。
+Expected: `30 passed, 0 failed`。
 
 `audio.js` 顶层只有 `const`/`function` 声明和最后的 `SDT.audio = {...}`，不碰 `document` 也不碰 `AudioContext`；`init()` 不会被调用，所以不会抛异常。
 
@@ -1708,7 +1743,7 @@ git commit -m "Wire up start, pause, language switching and the lookahead schedu
 - [ ] **Step 6: 全流程人工验收**
 
 Run: `node tools/run-tests.js`
-Expected: `29 passed, 0 failed`。
+Expected: `30 passed, 0 failed`。
 
 然后起一个本地静态服务（`file://` 下 `AudioContext` 可用，但用 `http://` 更接近真实环境）：
 
@@ -1724,7 +1759,7 @@ python3 -m http.server 8000
 4. 戴上蓝牙耳机，把延迟调到听觉与闪光重合 —— 这就是测量结果
 5. 暂停 → 声音和动效**同时**冻结；继续 → 从原处接上，不跳变
 6. 切到别的标签页再切回来 → 音画仍然同步（网页保持运行的前提下），并且**不会听到一串挤在一起的连响**（后台标签页的定时器被节流到约 1 秒一次，是这条路径最容易暴露的场景）。回来后音频会稀疏一阵再重新对齐到视觉网格上 —— 这是预期行为，不是故障
-7. 点「中/EN」→ 全部文案（含底部两行小字）立即切换，刷新后仍是上次选的语言
+7. 点「中/EN」→ 全部文案（含底部两行小字）立即切换，**标签页标题也跟着变**（它靠 `<title data-i18n="app.title">`，容易被漏看），刷新后仍是上次选的语言
 8. 手机 Chrome、iOS Safari 各走一遍上述流程；iOS 上确认静音拨片打开时仍有声
 
 - [ ] **Step 7: 提交验收记录**
@@ -1818,10 +1853,10 @@ git commit --allow-empty -m "Verify end-to-end manual acceptance checklist"
 - [ ] **Step 2: 验证浏览器与 Node 结果一致**
 
 Run: `node tools/run-tests.js`
-Expected: `29 passed, 0 failed`
+Expected: `30 passed, 0 failed`
 
 打开 `http://localhost:8000/tests.html`（用 Task 7 起的服务）。
-Expected: 页面底部 `29 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
+Expected: 页面底部 `30 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
 
 - [ ] **Step 3: 提交**
 
@@ -1856,14 +1891,14 @@ git commit -m "Add browser self-test page"
 
 ## 怎么用
 
-戴上耳机，点「开始」。页面会按固定节奏播放"滴嗒嗒哒"。用下面的按钮调整延迟值，
+戴上耳机，点「开始」。页面会按固定节奏播放“滴嗒嗒哒”。用下面的按钮调整延迟值，
 直到听感上声音与闪动的点完全重合 —— 屏幕上那个数字就是测得的延迟。
 
 - 一排四键：外侧是 ±10ms 粗调，内侧是 ±1ms 微调；**按住不放会连续加速**
 - 桌面还可以用 `←` `→` 调 1ms，`Shift + ←` `→` 调 10ms
 - 量程 0–500ms。上限不能再高：拍间隔本身就是 500ms，延迟 d 和 d+500 看起来是一样的
 
-读数还包含设备自身的音频与显示延迟（通常 10–40ms），所以它适合横向比较耳机、
+读数还包含设备自身的音频与显示延迟（通常 10–40 ms），所以它适合横向比较耳机、
 判断低延迟模式有没有生效，但不是实验室级绝对值。
 
 ## 本地运行
@@ -1902,7 +1937,7 @@ node tools/run-tests.js
 git status --short
 ```
 
-Expected: `29 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
+Expected: `30 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
 
 - [ ] **Step 4: 提交**
 
