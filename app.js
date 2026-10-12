@@ -141,8 +141,15 @@
   let holdButton = null;
 
   function endHold() {
+    // endHold 挂在 window 的 pointerup/pointercancel 上，也就是**应用里任何一次点击**
+    // 都会走到这里。所以没有真的在连发时必须立刻返回：
+    // 否则每次点击都会重写一遍读数、并且重新设置一次 aria-live —— 而重新登记一个
+    // live region 有可能让它把自己的内容再念一遍（点一下别处就重念一次延迟值）。
+    const wasHolding = holdButton !== null;
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     if (holdButton) { holdButton.classList.remove('held'); holdButton = null; }
+    if (!wasHolding) return;
+
     // 先把 aria-live 恢复成 polite，再写一次读数 ——
     // 连发期间的每一次改动（包括最后一次）都发生在 off 状态，而"恢复 polite"本身
     // 不构成一次播报。补一次赋值才会产生 mutation，屏幕阅读器也就只念这一个最终值。
