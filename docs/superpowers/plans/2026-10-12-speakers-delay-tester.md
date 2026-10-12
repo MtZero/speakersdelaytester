@@ -2137,6 +2137,8 @@ git commit -m "Add delay controls with press-and-hold repeat"
 
 - [ ] **Step 2: 加暂停与语言切换**
 
+插在文件末尾、`SDT.app = {` 那一段**之前**。（`currentLang` 虽然被 `start()` 用到，但 `start()` 只在点击时才跑，那时整个模块早已求值完毕，所以位置不影响正确性 —— 放这里只是为了保持"工具函数在前、导出在后"的读法。）
+
 ```js
   let currentLang = I18N.FALLBACK;
 
@@ -2169,9 +2171,9 @@ git commit -m "Add delay controls with press-and-hold repeat"
       setLang(currentLang === 'zh' ? 'en' : 'zh');
     });
 
-    // 切回前台时若音频上下文被挂起，恢复它。
-    // 因为一切以 ctx.currentTime 为准，不需要做任何重新对齐。
-    // 切回前台时恢复音频。因为一切以 ctx.currentTime 为准，恢复本身不需要重新对齐。
+    // 切回前台时恢复音频。因为一切以 ctx.currentTime 为准，恢复本身不需要重新对齐，
+    // 也不需要任何补偿。但"允许调用 resume()"不等于真的恢复了，
+    // 所以交给 watchForAudioLoss() 隔一会儿复查。
     document.addEventListener('visibilitychange', function () {
       if (document.hidden || !state.running || state.paused) return;
       SDT.audio.resume();
@@ -2223,7 +2225,7 @@ git commit -m "Add delay controls with press-and-hold repeat"
 
 注意 `wireControls()` 已经在 `collectElements()` 里调用了（Task 6 Step 1），不要重复调用。
 
-- [ ] **Step 5: 删除废弃文件并最终提交**
+- [ ] **Step 5: 提交**
 
 ```bash
 git add app.js
