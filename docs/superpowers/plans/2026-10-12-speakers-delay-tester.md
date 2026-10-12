@@ -39,7 +39,7 @@ SDT.timing.delayMax(beatMs)                    -> number
 SDT.timing.startLeadMs(beatMs)                 -> number
 SDT.timing.visualOffsetMs(n, beatMs)           -> number
 SDT.timing.audioOffsetMs(n, beatMs, delayMs)   -> number
-SDT.timing.firstFutureIndex(nowMs, originMs, delayMs, beatMs[, cutoffMs]) -> number
+SDT.timing.firstFutureIndex(nowMs, originMs, delayMs, beatMs) -> number
 SDT.timing.resumeIndex(nextIndex, cancelled, nowMs, originMs, delayMs, beatMs) -> number
 SDT.timing.pendingBeats(nextIndex, nowMs, originMs, delayMs, beatMs, horizonMs) -> {indices, nextIndex}
 SDT.timing.clampDelay(v, max)                  -> number
