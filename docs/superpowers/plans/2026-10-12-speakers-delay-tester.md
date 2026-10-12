@@ -1680,6 +1680,14 @@ Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名�
 
   let lastTMs = null;
 
+  // 渲染并记录 tMs。顺序是有意的：**渲染成功之后**才记录 ——
+  // 渲染抛错时 lastTMs 保持旧值，下一帧会重试，而不是默默接受一次失败的渲染。
+  // 抽成函数是为了让这个顺序只有一处定义，将来改动不会只改到一半的调用点。
+  function renderAndRecord(tMs) {
+    renderIndicator(tMs);
+    lastTMs = tMs;
+  }
+
   function frame() {
     // 先续下一次再渲染：万一渲染抛了错，循环不会就此永久死掉
     // （Task 7 用 frameStarted 挡住启动路径，一旦死掉就再也起不来了。
@@ -1691,8 +1699,7 @@ Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名�
     // 所以 tMs 没变时重绘纯属白费。暂停、启动前、音频丢失之后都因此几乎不花代价。
     // 注意 lastTMs 记在渲染**之后**：渲染抛错时不更新，于是下一帧会再试一次。
     if (tMs === lastTMs) return;
-    renderIndicator(tMs);
-    lastTMs = tMs;
+    renderAndRecord(tMs);
   }
 
   // 临时启动入口。Task 7 会把它换成启动遮罩。
@@ -1707,8 +1714,7 @@ Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名�
     // 先把静息状态画上去，再揭开遮罩。否则浏览器会拿 CSS 里的中性灰占位色先画一帧，
     // 而手机上这一帧可能被同一个任务里的 AudioContext 构造拖到几十毫秒 ——
     // 看起来就是"点了开始先闪一下灰"。tMs = 0 落在前导段，画出来正好全是静息色、扫描头全隐藏。
-    renderIndicator(0);
-    lastTMs = 0;
+    renderAndRecord(0);
     document.getElementById('start-overlay').hidden = true;
     document.getElementById('app').hidden = false;
     requestAnimationFrame(frame);
@@ -1726,7 +1732,11 @@ Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名�
 
   SDT.app = {
     state: state,
-    renderIndicator: renderIndicator,
+    // 包一层：直接暴露 renderIndicator 的话，外部探针调用会绕过 lastTMs 的记账 ——
+    // 时钟冻住时循环会以为"没变过"而跳过，面板就停在探针画的那个状态，直到时钟再动。
+    renderIndicator: function (t) {
+      renderAndRecord(t);
+    },
     renderReadout: renderReadout
   };
 
@@ -1778,7 +1788,11 @@ git commit -m "Add indicator rendering driven by the audio clock"
   function endHold() {
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     if (holdButton) { holdButton.classList.remove('held'); holdButton = null; }
+    // 先把 aria-live 恢复成 polite，再写一次读数 ——
+    // 连发期间的每一次改动（包括最后一次）都发生在 off 状态，而"恢复 polite"本身
+    // 不构成一次播报。补一次赋值才会产生 mutation，屏幕阅读器也就只念这一个最终值。
     document.querySelector('.readout').setAttribute('aria-live', 'polite');
+    if (els) renderReadout();
   }
 
   // 这里只管数值：夹取、刷新读数。
@@ -1924,6 +1938,10 @@ git commit -m "Add delay controls with press-and-hold repeat"
   // 藏进了没有覆盖的 DOM 胶水里。
   function pump() {
     if (!state.running || state.paused) return;
+    // 时钟冻住时（WebKit 的 interrupted，或页面隐藏）不能继续排：
+    // 那样最多有一拍会落在 120ms 前瞻窗内，而它的时刻是"过去"，
+    // 恢复时会被立刻播放 —— 就是设计里费力避免的"两声挤在一起"。
+    if (SDT.audio.state() !== 'running') return;
     const nowMs = SDT.audio.currentTime() * 1000;
     const r = T.pendingBeats(state.nextIndex, nowMs, state.originMs, state.delay,
                              state.beatMs, nowMs + LOOKAHEAD_MS);
@@ -1969,9 +1987,6 @@ git commit -m "Add delay controls with press-and-hold repeat"
     pump();
   }
 
-  // 注意：这里的 renderIndicator(0) 和 lastTMs = 0 是一对，来自 Task 5 的 tempStart()。
-  // 换成 start() 时要一起保留（或一起删掉），否则揭开遮罩那一下会闪一帧 CSS 占位灰，
-  // 或者 lastTMs 和实际画面对不上。
   function start() {
     if (!SDT.audio.isSupported()) {
       const err = document.getElementById('start-error');
@@ -1988,6 +2003,11 @@ git commit -m "Add delay controls with press-and-hold repeat"
     restart();
     if (timerId) clearInterval(timerId);
     timerId = setInterval(pump, TIMER_MS);
+    // 揭开遮罩之前先把静息状态画上去：否则浏览器会拿 CSS 里的中性灰占位色先画一帧，
+    // 而手机上这一帧可能被同一个任务里的 AudioContext 构造拖到几十毫秒。
+    // tMs = 0 落在前导段，画出来全是静息色、扫描头全隐藏，不会误闪。
+    // 顺序要紧：必须在 #app 变可见**之前**。
+    renderAndRecord(0);
     document.getElementById('start-overlay').hidden = true;
     document.getElementById('app').hidden = false;
     document.getElementById('start-error').hidden = true;
@@ -2280,7 +2300,9 @@ git commit -m "Add browser self-test page"
 2. 看每个闪光帧上 Paint / Raster 占 16.7ms 预算的比例
 3. 再按住 `+10` 录一次（此时主线程还要跑连发的定时器），看会不会恶化
 
-**判据**：闪光帧的绘制若稳定低于约 3ms，就这样发布；若接近或超过半帧，就按下面顺序降级 ——
+**判据**：看的是**有没有闪光帧的总耗时越过一帧预算** —— rAF 是按帧整帧交付的，掉一帧就是掉一帧，不会因为"平均很低"而没事。3ms 是个舒服的提前警戒线，不是及格线；手机上有别的东西尖峰时，8ms 也未必就安全。验收记录里**写明机型** —— "在我们手头这台手机上可以"是个有边界的结论，这个项目的其他结论也都是这么记的。
+
+若确实超了，按下面顺序降级 ——
 - 先试"模糊半径固定、只动颜色透明度"（几何不变，光栅有机会复用），视觉上仍然会亮起来
 - 再试把半径调小（绘制面积按半径平方缩，30px→15px 约省 4 倍）
 - 最后才考虑把光晕拆成独立图层、用静态模糊 + 动 `opacity`（纯合成，但要多加节点）
@@ -2295,6 +2317,8 @@ git commit -m "Add browser self-test page"
 - 横屏手机（高度小）时四键仍在首屏内，不需要滚动
 
 任何一档不达标，改 `styles.css` 里的 `clamp()` 参数或断点，改完重跑一遍。
+
+**不要为了窗口变化加 `resize` 重新采集。** 点和刻度的位置本来就是百分比，窗口一变自动就对了；重新采集会重写 `left` 并重置 `lit[]`，而 `frame()` 的 `tMs` 早退缓存并不知道这件事 —— 会出现"位置变了但画面没重画"。真要加，必须同时把 `lastTMs` 置空。规则是：**任何在 `frame()` 之外改动渲染输入的地方，都要让 `lastTMs` 失效。** 目前只有节拍间隔那一处需要。
 
 - [ ] **Step 3: 写 `README.md`**
 
