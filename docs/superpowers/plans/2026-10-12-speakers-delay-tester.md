@@ -78,6 +78,7 @@ SDT.audio.state()                              -> string
 `tools/run-tests.js` 把应用脚本加载进一个 `vm` 沙箱（因为它们只碰 `window.SDT`，不碰 DOM），然后跑 `tests.js` 里的断言。缺文件时跳过而不报错，这样"先写测试后写实现"的流程能跑通。
 
 ```js
+// 开发用，不部署。只依赖 Node 内置模块，不是"外部库"。
 'use strict';
 
 const fs = require('fs');
@@ -85,7 +86,9 @@ const path = require('path');
 const vm = require('vm');
 
 const ROOT = path.join(__dirname, '..');
-const APP_SCRIPTS = ['i18n.js', 'timing.js'];
+// audio.js 也一起加载：它在顶层不碰 document / AudioContext，所以在裸 vm 里能安全求值，
+// 顺带把它的语法错误挡在提交之前。
+const APP_SCRIPTS = ['i18n.js', 'timing.js', 'audio.js'];
 
 const sandbox = { console: console };
 vm.createContext(sandbox);
@@ -112,6 +115,12 @@ sandbox.SDT.test = {
 };
 
 vm.runInContext(fs.readFileSync(path.join(ROOT, 'tests.js'), 'utf8'), sandbox, { filename: 'tests.js' });
+
+// 一条都没跑也算失败 —— 否则 tests.js 被改坏成空文件时，这个运行器会安静地报"全绿"
+if (!results.length) {
+  console.log('no tests ran');
+  process.exit(1);
+}
 
 let failed = 0;
 for (const r of results) {
@@ -185,6 +194,18 @@ process.exit(failed === 0 ? 0 : 1);
     eq(T.clampDelay(NaN, 500), 0);
     eq(T.clampDelay(undefined, 500), 0);
     eq(T.clampDelay(Infinity, 500), 0);
+    // 输入框递过来的是字符串，不能因为类型就把用户的延迟静默清零
+    eq(T.clampDelay('12', 500), 12);
+    eq(T.clampDelay('12.6', 500), 13);
+    eq(T.clampDelay('abc', 500), 0);
+  });
+
+  run('DEFAULTS 与页面结构一致：4 个点、5 段、扫描头槽位够用', function () {
+    eq(T.DEFAULTS.beats, 4, 'index.html 里正好 4 个 .dot');
+    eq(T.DEFAULTS.segments, 5, 'index.html 里正好 4 个 .tick，即 5 段');
+    const need = Math.ceil(T.DEFAULTS.segments / T.DEFAULTS.beats);
+    eq(T.NEEDLE_SLOTS >= need, true,
+       'NEEDLE_SLOTS=' + T.NEEDLE_SLOTS + ' 不够 ' + need + ' 个并行扫描头');
   });
 
   // ─────────── 延迟改变后的重排起点 ───────────
@@ -208,6 +229,28 @@ process.exit(failed === 0 ? 0 : 1);
     // 安全线是 now+20，所以 now < 10380 时第 18 拍还排得上，到 10380 就必须换成第 19 拍。
     eq(T.firstFutureIndex(10379, 1100, 200, 500), 18);
     eq(T.firstFutureIndex(10380, 1100, 200, 500), 19);
+  });
+
+  run('resumeIndex: 什么都没有被取消时，不回退到更小的拍号', function () {
+    // now=2600 时第 3 拍还在未来，但当前已经排到第 7 拍。
+    // 没有拍被取消就不该回头，否则第 3..6 拍会被重排、多响几声。
+    eq(T.resumeIndex(7, [], 2600, 1100, 0, 500), 7);
+    eq(T.resumeIndex(7, null, 2600, 1100, 0, 500), 7);
+    eq(T.resumeIndex(7, undefined, 2600, 1100, 0, 500), 7);
+  });
+
+  run('resumeIndex: 从被取消的最小拍号续排，不丢拍也不重排', function () {
+    // 第 3、4 拍被取消 → 从第 3 拍续排（此刻它仍在未来，floor 是 3）
+    eq(T.resumeIndex(5, [4, 3], 2600, 1100, 0, 500), 3);
+  });
+
+  run('resumeIndex: 拍会被排到过去时，往后跳到未来 —— 这是暂停后改延迟的必经之路', function () {
+    // 暂停在 ctx=3000ms 时把延迟从 0 拉到 500：第 3 拍的音频时刻
+    // 从 1100+2000=3100 前移到 1100+2000-500=2600，已经是过去。
+    // 只取 max(min(cancelled), floor) 才能既不重排已响过的、又不炸响。
+    eq(T.resumeIndex(3, [3], 3000, 1100, 500, 500), 4);
+    // 对照：同样的取消集合，不改延迟时第 3 拍仍在未来，就该从第 3 拍续
+    eq(T.resumeIndex(3, [3], 3000, 1100, 0, 500), 3);
   });
 
   // ─────────── 点与刻度的位置 ───────────
@@ -293,13 +336,34 @@ process.exit(failed === 0 ? 0 : 1);
     close(list[0].position, 0.4, 1e-12);
   });
 
+  // 这台仪器赖以成立的不变量：扫描头压到第 i 个点的**时刻**，
+  // 正好就是第 i 个点闪亮的**时刻**。用户就是靠这个重合去调延迟的。
+  // 单函数各自钉死绝对值的那些测试挡不住"约定整体偏移"式的重构，这一条可以。
+  run('不变量：扫描头压到第 i 个点，正是第 i 个点闪亮的时刻', function () {
+    const beatMs = 500, beats = 4, segments = 5;
+    const cycle = T.cycleMs(beatMs, beats);
+    for (let i = 0; i < beats; i++) {
+      const target = T.dotPosition(i, segments);
+      for (let m = 0; m < 6; m++) {
+        const tMs = T.visualOffsetMs(i, beatMs) + m * cycle;
+        eq(T.beatAgeMs(tMs, i, beatMs, cycle), 0, 't=' + tMs + ' 第 ' + i + ' 个点应当刚闪');
+        let hit = null;
+        for (const n of T.needles(tMs, beatMs, beats, segments)) {
+          if (n && Math.abs(n.position - target) < 1e-12) hit = n;
+        }
+        eq(hit !== null, true, 't=' + tMs + ' 没有扫描头压在第 ' + i + ' 个点上');
+        eq(hit.opacity, 1, 't=' + tMs + ' 压点的扫描头应当是全亮的');
+      }
+    }
+  });
+
 })(typeof window !== 'undefined' ? window : globalThis);
 ```
 
 - [ ] **Step 3: 运行测试，确认失败**
 
 Run: `node tools/run-tests.js`
-Expected: 15 个用例全部 `FAIL`，错误信息是 `Cannot read properties of undefined (reading 'visualOffsetMs')` 之类（`timing.js` 还不存在），最后一行 `0 passed, 15 failed`。
+Expected: 20 个用例全部 `FAIL`，错误信息是 `Cannot read properties of undefined (reading 'visualOffsetMs')` 之类（`timing.js` 还不存在），最后一行 `0 passed, 20 failed`。
 
 （若报的是"找不到 timing.js"，说明运行器的 `existsSync` 跳过逻辑没生效，回 Step 1 检查。）
 
@@ -344,9 +408,32 @@ Expected: 15 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
     return n < 0 ? 0 : n;
   }
 
+  // 改延迟之后，下一拍该从哪一号继续排。这是整个调度里最容易出事的一处，
+  // 所以它必须是个纯函数、必须被测试覆盖。两个约束缺一不可：
+  //
+  //   1. 不低于被取消的最小拍号 —— 否则会把"已经响过"的拍再排一次，用户多听到一声。
+  //   2. 不低于 firstFutureIndex —— 否则会把拍排到过去。Web Audio 对过去的 start 时刻
+  //      不报错，直接立刻播；结果是一声炸响之后节奏被压缩（两拍挤在一起）。
+  //      暂停后改延迟必然触发：ctx.currentTime 冻结，而音频时刻随延迟前移。
+  function resumeIndex(nextIndex, cancelled, nowMs, originMs, delayMs, beatMs) {
+    let n = nextIndex;
+    if (cancelled && cancelled.length) {
+      let min = cancelled[0];
+      for (let i = 1; i < cancelled.length; i++) {
+        if (cancelled[i] < min) min = cancelled[i];
+      }
+      n = min;
+    }
+    const floor = firstFutureIndex(nowMs, originMs, delayMs, beatMs);
+    return n < floor ? floor : n;
+  }
+
+  // Number() 先转一道：调用方可能直接把 input.value（字符串）递进来，
+  // 不转的话 "12" 会被判成非法输入、静默把用户的延迟清零。
   function clampDelay(v, max) {
-    if (typeof v !== 'number' || !isFinite(v)) return 0;
-    const r = Math.round(v);
+    const n = Number(v);
+    if (!isFinite(n)) return 0;
+    const r = Math.round(n);
     if (r < 0) return 0;
     if (r > max) return max;
     return r;
@@ -355,7 +442,7 @@ Expected: 15 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
   function dotPosition(i, segments) { return (i + 1) / segments; }
 
   function beatAgeMs(tMs, i, beatMs, cycle) {
-    let age = (tMs - beatMs * (i + 1)) % cycle;
+    let age = (tMs - visualOffsetMs(i, beatMs)) % cycle;
     if (age < 0) age += cycle;
     return age;
   }
@@ -383,7 +470,7 @@ Expected: 15 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
       out.push({
         k: k0 + j,
         position: elapsed / sweep,
-        opacity: opacity < 0 ? 0 : opacity
+        opacity: opacity
       });
     }
     return out;
@@ -402,6 +489,7 @@ Expected: 15 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
     visualOffsetMs: visualOffsetMs,
     audioOffsetMs: audioOffsetMs,
     firstFutureIndex: firstFutureIndex,
+    resumeIndex: resumeIndex,
     clampDelay: clampDelay,
     dotPosition: dotPosition,
     beatAgeMs: beatAgeMs,
@@ -414,7 +502,7 @@ Expected: 15 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
 - [ ] **Step 5: 运行测试，确认全绿**
 
 Run: `node tools/run-tests.js`
-Expected: 全部 `ok`，最后一行 `15 passed, 0 failed`，退出码 0。
+Expected: 全部 `ok`，最后一行 `20 passed, 0 failed`，退出码 0。
 
 - [ ] **Step 6: 提交**
 
@@ -480,7 +568,7 @@ git commit -m "Add pure timing math with a zero-dependency test runner"
 - [ ] **Step 2: 运行测试，确认失败**
 
 Run: `node tools/run-tests.js`
-Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undefined (reading 'strings')`；原有 15 个仍 `ok`。
+Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undefined (reading 'strings')`；原有 20 个仍 `ok`。
 
 - [ ] **Step 3: 实现 `i18n.js`**
 
@@ -573,7 +661,7 @@ Expected: 新增 5 个用例 `FAIL`，错误是 `Cannot read properties of undef
 - [ ] **Step 4: 运行测试，确认全绿**
 
 Run: `node tools/run-tests.js`
-Expected: `20 passed, 0 failed`。
+Expected: `25 passed, 0 failed`。
 
 - [ ] **Step 5: 提交**
 
@@ -1065,10 +1153,12 @@ git commit -m "Add page skeleton and styles"
 
 - [ ] **Step 2: 确认没有打破已有的测试**
 
-Run: `node tools/run-tests.js`
-Expected: `20 passed, 0 failed`。
+`tools/run-tests.js` 的 `APP_SCRIPTS` 里已经包含 `audio.js`，所以这一步顺带验证了它能在裸 vm 里求值。
 
-`audio.js` 在 Node 里加载时 `root.AudioContext` 是 `undefined`，`init()` 不会被调用，所以不会抛异常。
+Run: `node tools/run-tests.js`
+Expected: `25 passed, 0 failed`。
+
+`audio.js` 顶层只有 `const`/`function` 声明和最后的 `SDT.audio = {...}`，不碰 `document` 也不碰 `AudioContext`；`init()` 不会被调用，所以不会抛异常。
 
 - [ ] **Step 3: 提交**
 
@@ -1285,9 +1375,6 @@ git commit -m "Add indicator rendering driven by the audio clock"
     if (holdButton) { holdButton.classList.remove('held'); holdButton = null; }
   }
 
-  // 取消已排但还没响的音频，从其中最小的拍号续排。
-  // 见设计文档 §5.4：既不能重排已经响过的那一拍（会多一声），
-  // 也不能让 nextIndex 单调递增（会漏一声）。
   function applyDelay(next) {
     const clamped = T.clampDelay(next, T.delayMax(state.beatMs));
     if (clamped === state.delay) return;
@@ -1295,12 +1382,13 @@ git commit -m "Add indicator rendering driven by the audio clock"
     renderReadout();
 
     if (!state.running) return;
+    // 取消已排但还没响的音频，再从"被取消的最小拍号"和"第一个仍在未来的拍号"里取大的那个续排。
+    // 两个约束缺一不可（会多一声 / 会炸响），推导见 timing.js 里 resumeIndex 的注释和设计文档 §5.4。
     const cancelled = SDT.audio.cancelPending();
-    if (cancelled.length) {
-      let min = cancelled[0];
-      for (const idx of cancelled) if (idx < min) min = idx;
-      state.nextIndex = min;
-    }
+    state.nextIndex = T.resumeIndex(
+      state.nextIndex, cancelled,
+      SDT.audio.currentTime() * 1000, state.originMs, state.delay, state.beatMs
+    );
     pump();
   }
 
@@ -1538,7 +1626,7 @@ git commit -m "Wire up start, pause, language switching and the lookahead schedu
 - [ ] **Step 6: 全流程人工验收**
 
 Run: `node tools/run-tests.js`
-Expected: `20 passed, 0 failed`。
+Expected: `25 passed, 0 failed`。
 
 然后起一个本地静态服务（`file://` 下 `AudioContext` 可用，但用 `http://` 更接近真实环境）：
 
@@ -1648,10 +1736,10 @@ git commit --allow-empty -m "Verify end-to-end manual acceptance checklist"
 - [ ] **Step 2: 验证浏览器与 Node 结果一致**
 
 Run: `node tools/run-tests.js`
-Expected: `20 passed, 0 failed`
+Expected: `25 passed, 0 failed`
 
 打开 `http://localhost:8000/tests.html`（用 Task 7 起的服务）。
-Expected: 页面底部 `20 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
+Expected: 页面底部 `25 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
 
 - [ ] **Step 3: 提交**
 
@@ -1732,7 +1820,7 @@ node tools/run-tests.js
 git status --short
 ```
 
-Expected: `20 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
+Expected: `25 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
 
 - [ ] **Step 4: 提交**
 
