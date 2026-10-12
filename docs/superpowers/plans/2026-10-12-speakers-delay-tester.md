@@ -2471,6 +2471,47 @@ git commit -m "Add README and finish responsive polish"
 
 ---
 
+## Task 10: 打包成单文件
+
+用户要一个可以直接发出去、双击就能打开的单文件版本。这一步产出一个构建脚本，**不手工拼**——
+源文件还会继续改，手工拼的东西第二天就过期了。
+
+**Files:**
+- Create: `tools/build-single-file.js`
+- Create（脚本产出，不进版本库）: `dist/speakers-delay-tester.html`
+- Modify: `.gitignore`（加 `dist/`）
+
+- [ ] **Step 1: 写构建脚本**
+
+把 `index.html`、`styles.css`、`i18n.js`、`timing.js`、`audio.js`、`app.js` 内联进一个 HTML。
+
+要求：
+
+- **严格按 `index.html` 里 `<script src>` 的现有顺序**内联 js —— 顺序是承重的（`timing.js` 必须在 `audio.js` 之前，因为 `audio.js` 在顶层就读 `SDT.timing.CANCEL_CUTOFF_MS`）。脚本应该去解析 `index.html` 里的顺序，而不是自己维护一份列表，否则将来加文件会漏。
+- `</script>` 出现在被内联的 js 字符串里会提前结束标签，必须转义（把 `</` 替换成 `<\/`）。目前代码里没有，但这是这类脚本唯一致命的坑。
+- `<link rel="stylesheet">` 换成内联 `<style>`。
+- 产出文件名 `dist/speakers-delay-tester.html`，目录不存在就创建。
+- 结束时打印产物路径和字节数。
+- 只依赖 Node 内置模块（和 `tools/run-tests.js` 一样，是开发工具，不是"外部库"）。
+
+- [ ] **Step 2: 验证产物确实是同一个应用**
+
+这一步不是"看一眼像不像"，而是**用和审查同一套 CDP 手法去驱动产物**：
+
+- `node tools/build-single-file.js`，然后确认 `dist/speakers-delay-tester.html` 里**没有任何** `src=` / `href=` 指向外部文件（grep 一遍）。
+- 用 headless Chrome 以 `file://` 打开产物，跑一遍 Task 7 的自动检查里还能跑的部分：控制台零异常、零 404、点了开始之后指示器在动、按钮能改数值。
+- 和源文件版本对比：`SDT.timing` 的导出集合、`document.querySelectorAll('.dot').length` 等结构计数必须一致。
+- **断网打开也要能用** —— 这是单文件的意义所在。用 CDP 把网络全部拦掉再加载，行为应当不变。
+
+- [ ] **Step 3: 提交**
+
+```bash
+git add tools/build-single-file.js .gitignore
+git commit -m "Add a single-file build script"
+```
+
+产物不进版本库（`dist/` 已忽略）。要发出去时本地跑一次脚本即可。
+
 ## 完成标准
 
 - [ ] `node tools/run-tests.js` 全绿
@@ -2480,3 +2521,4 @@ git commit -m "Add README and finish responsive polish"
 - [ ] 中英文切换即时生效且刷新后保持
 - [ ] 暂停/继续、前后台切换后音画仍然同步
 - [ ] 0 与 500 两个边界都钳得住
+- [ ] `node tools/build-single-file.js` 产出的单文件断网可用，且与控制台里的源文件版本行为一致
