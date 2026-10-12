@@ -1529,6 +1529,20 @@ git commit -m "Add audio engine with a testable tone synthesiser"
 
 **Files:**
 - Create: `app.js`
+- Modify: `i18n.js`（补一个键，见 Step 0）
+
+- [ ] **Step 0: 补上 `error.audioLost` 文案**
+
+`i18n.js` 的两种语言表里各加一条：
+
+```js
+      'error.audioLost': '音频被系统中断，没能自动恢复。点下面的按钮重新开始。',
+```
+```js
+      'error.audioLost': 'Audio was interrupted by the system and could not recover. Tap below to restart.',
+```
+
+Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名本身**（这是有意的设计，便于排查），所以漏了它会安静地在界面上显示成字面量 `error.audioLost`，而键一致性测试照样通过 —— 那是测试体系看不见的一个洞。补完跑一次 `node tools/run-tests.js`，确认仍是 `33 passed, 0 failed`（键一致性用例遍历整张表，会自动覆盖新键）。
 
 - [ ] **Step 1: 写 `app.js` 的指示器部分**
 
