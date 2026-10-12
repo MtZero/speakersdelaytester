@@ -342,6 +342,16 @@
       return;
     }
     SDT.audio.init();
+    // 系统可能随时掐掉音频会话，而且不产生任何页面事件 —— 最典型的是 AirPods 的入耳检测：
+    // 摘下耳机，macOS/iOS 暂停音频会话，上下文被挂起，currentTime 冻结，
+    // 而指示器用的是同一个时钟，于是跟着冻住：仪器看着正常，其实已经死了。
+    // 摘下又戴回去时系统会自己恢复，所以这里只做复查、不强行 resume
+    // （非手势的 resume 多半会被拒），超过 600ms 还没恢复才把话说出来。
+    SDT.audio.onStateChange(function () {
+      if (state.running && !state.paused && SDT.audio.state() !== 'running') {
+        watchForAudioLoss();
+      }
+    });
     // start() 一定跑在用户手势里，而手势正是浏览器允许恢复音频的唯一时机 ——
     // 从"音频被系统打断"里回来就靠这一下（见下面的 showAudioLost）。
     SDT.audio.resume();
