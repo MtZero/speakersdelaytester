@@ -429,6 +429,21 @@ process.exit(failed === 0 ? 0 : 1);
     }
   });
 
+  // 连发曲线是 Task 6 里唯一有明确数值契约的东西，而它曾经住在 app.js 里 ——
+  // 那里的代码既不被 Node 运行器加载，也没法被它加载（app.js 在顶层就绑 DOM）。
+  // 搬进 timing.js 之后，每个档位两侧的边界都能钉住了。
+  run('连发曲线：每个档位的两侧都钉住', function () {
+    eq(T.HOLD_DELAY_MS, 380);
+    eq(T.repeatIntervalMs(0), 110);
+    eq(T.repeatIntervalMs(800), 110, '800 本身还在最慢档');
+    eq(T.repeatIntervalMs(801), 70, '过 800 才进下一档');
+    eq(T.repeatIntervalMs(1400), 70);
+    eq(T.repeatIntervalMs(1401), 40);
+    eq(T.repeatIntervalMs(2200), 40);
+    eq(T.repeatIntervalMs(2201), 24);
+    eq(T.repeatIntervalMs(10000), 24);
+  });
+
   // 这台仪器赖以成立的不变量：扫描头压到第 i 个点的**时刻**，
   // 正好就是第 i 个点闪亮的**时刻**。用户就是靠这个重合去调延迟的。
   // 单函数各自钉死绝对值的那些测试挡不住"约定整体偏移"式的重构，这一条可以。
@@ -560,6 +575,17 @@ Expected: 24 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
     return r;
   }
 
+  // 长按连发的时序。放在这里而不是 app.js，就是为了能被测 ——
+  // 它是设计文档 §8.2 写死的数值契约，不是随手调的手感参数。
+  const HOLD_DELAY_MS = 380;
+  // 按住越久连发越快：110ms → 70ms → 40ms → 24ms
+  function repeatIntervalMs(heldMs) {
+    if (heldMs > 2200) return 24;
+    if (heldMs > 1400) return 40;
+    if (heldMs > 800) return 70;
+    return 110;
+  }
+
   function dotPosition(i, segments) { return (i + 1) / segments; }
 
   function beatAgeMs(tMs, i, beatMs, cycle) {
@@ -613,6 +639,8 @@ Expected: 24 个用例全部 `FAIL`，错误信息是 `Cannot read properties of
     resumeIndex: resumeIndex,
     pendingBeats: pendingBeats,
     clampDelay: clampDelay,
+    HOLD_DELAY_MS: HOLD_DELAY_MS,
+    repeatIntervalMs: repeatIntervalMs,
     dotPosition: dotPosition,
     beatAgeMs: beatAgeMs,
     needles: needles
@@ -1508,7 +1536,7 @@ Expected: 新增 2 个用例 `FAIL`，错误是 `Cannot read properties of undef
 - [ ] **Step 4: 运行测试，确认全绿**
 
 Run: `node tools/run-tests.js`
-Expected: 33 × `  ok  <name>`，最后一行 `33 passed, 0 failed`，退出码 0。
+Expected: 34 × `  ok  <name>`，最后一行 `34 passed, 0 failed`，退出码 0。
 
 注意最后那条 `audio 记账` 用例在补丁前后都是绿的 —— 原来的 `cancelPending` 本来就用了严格的 `>`。它是**钉住既有行为**的测试，不是红绿循环。它的价值要靠变异测试来确认：把 `p.time > cutoff` 改成 `>=`，它必须失败。
 
@@ -1542,7 +1570,7 @@ git commit -m "Add audio engine with a testable tone synthesiser"
       'error.audioLost': 'Audio was interrupted by the system and could not recover. Tap below to restart.',
 ```
 
-Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名本身**（这是有意的设计，便于排查），所以漏了它会安静地在界面上显示成字面量 `error.audioLost`，而键一致性测试照样通过 —— 那是测试体系看不见的一个洞。补完跑一次 `node tools/run-tests.js`，确认仍是 `33 passed, 0 failed`（键一致性用例遍历整张表，会自动覆盖新键）。
+Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名本身**（这是有意的设计，便于排查），所以漏了它会安静地在界面上显示成字面量 `error.audioLost`，而键一致性测试照样通过 —— 那是测试体系看不见的一个洞。补完跑一次 `node tools/run-tests.js`，确认仍是 `34 passed, 0 failed`（键一致性用例遍历整张表，会自动覆盖新键）。
 
 - [ ] **Step 1: 写 `app.js` 的指示器部分**
 
@@ -1603,6 +1631,7 @@ Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名�
       dots: dots,
       ticks: ticks,
       needles: Array.prototype.slice.call(stage.querySelectorAll('.needle')),
+      readout: document.querySelector('.readout'),
       delayValue: document.getElementById('delay-value')
     };
     lit = new Array(dots.length).fill(null);   // null = 还没画过，见 renderIndicator
@@ -1773,17 +1802,9 @@ git commit -m "Add indicator rendering driven by the audio clock"
 在 `renderReadout` 之后、`frame` 之前插入：
 
 ```js
-  const HOLD_DELAY_MS = 380;
-  // 按住越久连发越快：110ms → 70ms → 40ms → 24ms
-  function repeatIntervalMs(heldMs) {
-    if (heldMs > 2200) return 24;
-    if (heldMs > 1400) return 40;
-    if (heldMs > 800) return 70;
-    return 110;
-  }
-
   let holdTimer = null;
   let holdButton = null;
+  let holdPointerId = null;
 
   function endHold() {
     // endHold 挂在 window 的 pointerup/pointercancel 上，也就是**应用里任何一次点击**
@@ -1793,13 +1814,22 @@ git commit -m "Add indicator rendering driven by the audio clock"
     const wasHolding = holdButton !== null;
     if (holdTimer) { clearTimeout(holdTimer); holdTimer = null; }
     if (holdButton) { holdButton.classList.remove('held'); holdButton = null; }
+    holdPointerId = null;
     if (!wasHolding) return;
 
     // 先把 aria-live 恢复成 polite，再写一次读数 ——
     // 连发期间的每一次改动（包括最后一次）都发生在 off 状态，而"恢复 polite"本身
     // 不构成一次播报。补一次赋值才会产生 mutation，屏幕阅读器也就只念这一个最终值。
-    document.querySelector('.readout').setAttribute('aria-live', 'polite');
-    if (els) renderReadout();
+    els.readout.setAttribute('aria-live', 'polite');
+    renderReadout();
+  }
+
+  // 只有发起这次连发的那根手指/那支笔有资格结束它。
+  // 不辨来源的话：一根手指按住 +10、另一根手指点一下 -1 再抬起，
+  // 会把 +10 的连发一并掐掉 —— 按钮看着还按着却不再响应，值也卡在中途。
+  function endHoldFromPointer(e) {
+    if (e.pointerId !== holdPointerId) return;
+    endHold();
   }
 
   // 这里只管数值：夹取、刷新读数。
@@ -1813,13 +1843,14 @@ git commit -m "Add indicator rendering driven by the audio clock"
     renderReadout();
   }
 
-  function beginHold(btn, step) {
+  function beginHold(btn, step, pointerId) {
     endHold();
     holdButton = btn;
+    holdPointerId = pointerId;
     btn.classList.add('held');
     // 连发时读数每秒要改几十次。aria-live 一直是 polite 的话，屏幕阅读器要么排队
     // 要么来不及处理；先关掉，松手时再打开，于是它只会念出最终值那一次。
-    document.querySelector('.readout').setAttribute('aria-live', 'off');
+    els.readout.setAttribute('aria-live', 'off');
     applyDelay(state.delay + step);
 
     const t0 = performance.now();
@@ -1841,9 +1872,18 @@ git commit -m "Add indicator rendering driven by the audio clock"
     const buttons = document.querySelectorAll('.btn.step');
     for (const btn of buttons) {
       const step = parseInt(btn.getAttribute('data-step'), 10);
+      // 属性打错或漏了会得到 NaN，而 clampDelay 把非有限值当 0 ——
+      // 于是那个按钮会静默地把用户的测量清零。宁可响亮地失败。
+      if (!isFinite(step) || step === 0) {
+        throw new Error('data-step 不是有效步长: ' + btn.outerHTML);
+      }
+
       btn.addEventListener('pointerdown', function (e) {
-        e.preventDefault();          // 阻止长按选中和双击缩放
-        beginHold(btn, step);
+        // 鼠标不要 preventDefault：它会连带压掉 mousedown 的默认动作（把焦点交给按钮），
+        // 于是点过的按钮不会成为 Tab 的起点。触摸才需要拦，防的是长按选中和双击缩放 ——
+        // 而这两件事 CSS 里本来就都覆盖了（.btn 的 user-select、.btn.step 的 touch-action）。
+        if (e.pointerType !== 'mouse') e.preventDefault();
+        beginHold(btn, step, e.pointerId);
       });
       btn.addEventListener('contextmenu', function (e) { e.preventDefault(); });
 
@@ -1851,12 +1891,26 @@ git commit -m "Add indicator rendering driven by the audio clock"
       // 只接 pointerdown 的话，聚焦到按钮再按回车是没有反应的。
       // detail === 0 是合成点击（键盘/AT），鼠标和触摸是 1，用它避免一次按压走两步。
       btn.addEventListener('click', function (e) {
-        if (e.detail === 0) applyDelay(state.delay + step);
+        if (e.detail !== 0) return;
+        applyDelay(state.delay + step);
+        // 已经到边界（0 或 500）时再按就没有变化了，而屏幕阅读器只对变化有反应 ——
+        // 键盘/AT 用户会完全收不到任何反馈。补写一次产生 mutation，把当前值念出来。
+        renderReadout();
       });
     }
-    // 释放监听到 window 上：手指滑出按钮再松开也要停
-    window.addEventListener('pointerup', endHold);
-    window.addEventListener('pointercancel', endHold);
+    // 释放监听到 window 上：手指滑出按钮再松开也要停。
+    // 用 endHoldFromPointer 而不是 endHold —— 只有发起那次连发的指针才能结束它。
+    window.addEventListener('pointerup', endHoldFromPointer);
+    window.addEventListener('pointercancel', endHoldFromPointer);
+
+    // 释放事件有可能永远不来：按住时 Alt+Tab 切走、弹出权限框、在窗口外松手。
+    // 不兜底的话连发会一直跑下去 —— 值卡在边界、.held 一直亮着，
+    // 而且 aria-live 停在 off，读数从此不再播报。三个都是便宜的兜网，endHold 本身幂等。
+    window.addEventListener('blur', endHold);
+    window.addEventListener('pagehide', endHold);
+    document.addEventListener('visibilitychange', function () {
+      if (document.hidden) endHold();
+    });
 
     // Task 7 会把它改成走 restart()（理由见那里）。现在只改数值。
     document.getElementById('reset-btn').addEventListener('click', function () {
@@ -1866,9 +1920,19 @@ git commit -m "Add indicator rendering driven by the audio clock"
 
     // 桌面键盘：← → 调 1ms，Shift + ← → 调 10ms
     window.addEventListener('keydown', function (e) {
+      // 还没开始就不要改值：那时读数藏在 hidden 的容器里，按了没有任何可见反馈，
+      // 却已经把延迟预设成了一个非零值。
+      if (!state.running) return;
+      // 带修饰键的一律放行：Safari 里 Cmd+← 是"后退"，Windows 上 Chrome 的 Alt+← 也是。
+      // 拦下来会把它变成改延迟值 —— 用户想返回上一页，结果静默改掉了自己的测量，
+      // 浏览器那边也没有跳转。这一条在目标平台上随时可复现。
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      if (e.isComposing) return;                    // 输入法组合中，方向键是在选字
       if (e.key !== 'ArrowLeft' && e.key !== 'ArrowRight') return;
-      const tag = (e.target && e.target.tagName) || '';
-      if (tag === 'INPUT' || tag === 'TEXTAREA') return;
+      const target = e.target;
+      const tag = (target && target.tagName) || '';
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+      if (target && target.isContentEditable) return;   // 可编辑区域内部的元素 tagName 不是 INPUT
       const step = (e.shiftKey ? T.DEFAULTS.stepCoarse : T.DEFAULTS.stepFine) *
                    (e.key === 'ArrowRight' ? 1 : -1);
       e.preventDefault();
@@ -2169,7 +2233,7 @@ git commit -m "Wire up start, pause, language switching and the lookahead schedu
 - [ ] **Step 6: 全流程人工验收**
 
 Run: `node tools/run-tests.js`
-Expected: `33 passed, 0 failed`。
+Expected: `34 passed, 0 failed`。
 
 然后起一个本地静态服务（`file://` 下 `AudioContext` 可用，但用 `http://` 更接近真实环境）：
 
@@ -2184,11 +2248,12 @@ python3 -m http.server 8000
 3. 点"开始"后约 1.1s 静默，然后第一声"滴"响起，同时第 1 个点闪亮
 4. 戴上蓝牙耳机，把延迟调到听觉与闪光重合 —— 这就是测量结果
 5. 暂停 → 声音和动效**同时**冻结；继续 → 从原处接上，不跳变
-6. **调延迟时节奏不中断**：连按 `+10` 期间，滴嗒声应当只有一个整体位移，不会出现某一拍重复响或整拍消失。这一条要等音频真的在响才能验，所以它属于这里而不是 Task 6
-6. 切到别的标签页再切回来 → 音画仍然同步（网页保持运行的前提下），并且**不会听到一串挤在一起的连响**（后台标签页的定时器被节流到约 1 秒一次，是这条路径最容易暴露的场景）。回来后音频会稀疏一阵再重新对齐到视觉网格上 —— 这是预期行为，不是故障
-8. 点「中/EN」→ 全部文案（含底部两行小字）立即切换，**标签页标题也跟着变**（它靠 `<title data-i18n="app.title">`，容易被漏看），刷新后仍是上次选的语言
-9. 手机 Chrome、iOS Safari 各走一遍上述流程；iOS 上确认静音拨片打开时仍有声
-10. **iOS 实测音频打断**：播放中锁屏再解锁，或触发一次来电/Siri，然后切回页面 —— 声音和动效必须都恢复。这是设计文档 §11 记的那条残余风险：`resume()` 现在会尝试恢复，但 WebKit 允许调用不等于真的成功。若回来之后指示器还在动、数字却不再跟随节奏（或干脆冻住），就是中招了 —— 那时要加一条明确的"请重新加载"提示，别让用户对着一个假活的仪器读数
+6. **调延迟时节奏不中断** —— 而且要在**按住 `+10` 不放**的时候看，不只是点按。按住时 `applyDelay` 会以每秒约 40 次的频率跑「取消已排 + 重排」，是这套设计遇到过的最高速率。滴嗒声应当只有一个整体位移，不会出现某一拍重复响或整拍消失
+7. **按住 `+10`，Alt+Tab 切走，在别处松开鼠标再回来** —— 连发必须已经停了，按钮不能还亮着。这类释放事件浏览器可能根本不会送过来，代码里布了兜网；这是唯一一条没人会碰巧走到的路径，所以要专门试
+8. 切到别的标签页再切回来 → 音画仍然同步（网页保持运行的前提下），并且**不会听到一串挤在一起的连响**（后台标签页的定时器被节流到约 1 秒一次，是这条路径最容易暴露的场景）。回来后音频会稀疏一阵再重新对齐到视觉网格上 —— 这是预期行为，不是故障
+9. 点「中/EN」→ 全部文案（含底部两行小字）立即切换，**标签页标题也跟着变**（它靠 `<title data-i18n="app.title">`，容易被漏看），刷新后仍是上次选的语言
+10. 手机 Chrome、iOS Safari 各走一遍上述流程；iOS 上确认静音拨片打开时仍有声
+11. **iOS 实测音频打断**：播放中锁屏再解锁，或触发一次来电/Siri，然后切回页面 —— 声音和动效必须都恢复。这是设计文档 §11 记的那条残余风险：`resume()` 现在会尝试恢复，但 WebKit 允许调用不等于真的成功。若回来之后指示器还在动、数字却不再跟随节奏（或干脆冻住），就是中招了 —— 那时要加一条明确的"请重新加载"提示，别让用户对着一个假活的仪器读数
 
 - [ ] **Step 7: 提交验收记录**
 
@@ -2282,10 +2347,10 @@ git commit --allow-empty -m "Verify end-to-end manual acceptance checklist"
 - [ ] **Step 2: 验证浏览器与 Node 结果一致**
 
 Run: `node tools/run-tests.js`
-Expected: `33 passed, 0 failed`
+Expected: `34 passed, 0 failed`
 
 打开 `http://localhost:8000/tests.html`（用 Task 7 起的服务）。
-Expected: 页面底部 `33 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
+Expected: 页面底部 `34 passed, 0 failed`，与终端结果条数一致。若不一致，说明 `tests.js` 依赖了只有某一侧才有的东西，回头改 `tests.js`，**不要**去改其中一侧的运行器。
 
 - [ ] **Step 3: 提交**
 
@@ -2395,7 +2460,7 @@ node tools/run-tests.js
 git status --short
 ```
 
-Expected: `33 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
+Expected: `34 passed, 0 failed`；`git status` 除了待提交的文件外没有意外产物（`.superpowers/`、`.idea/` 已被 `.gitignore` 排除）。
 
 - [ ] **Step 4: 提交**
 
