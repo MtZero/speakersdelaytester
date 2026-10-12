@@ -1877,7 +1877,11 @@ git commit -m "Add indicator rendering driven by the audio clock"
   SDT.app = {
     state: state,
     applyDelay: applyDelay,
-    renderIndicator: renderIndicator,
+    // 包一层：直接暴露 renderIndicator 的话，外部探针调用会绕过 lastTMs 的记账 ——
+    // 时钟冻住时循环会以为"没变过"而跳过，面板就停在探针画的那个状态，直到时钟再动。
+    renderIndicator: function (t) {
+      renderAndRecord(t);
+    },
     renderReadout: renderReadout
   };
 ```
