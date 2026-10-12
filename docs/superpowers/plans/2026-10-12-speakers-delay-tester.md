@@ -511,6 +511,9 @@ git add timing.js tests.js tools/run-tests.js
 git commit -m "Add pure timing math with a zero-dependency test runner"
 ```
 
+> 注：若本任务是在代码审查之后重跑的补丁轮，提交信息用
+> `Add resumeIndex to prevent scheduling beats into the past`。
+
 ---
 
 ## Task 2: 多语种
