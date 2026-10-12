@@ -1581,7 +1581,6 @@ Task 7 要用它。之所以现在就补：`t()` 在缺键时**回落到键名�
 
   let els = null;
   let timerId = null;
-  let frameStarted = false;
   let lit = [];          // 每个点上一次是否处于"亮"的状态，用来省掉绝大多数重绘
 
   function rgba(rgb, alpha) {
@@ -1877,7 +1876,16 @@ git commit -m "Add delay controls with press-and-hold repeat"
 
 - [ ] **Step 1: 加前瞻调度器与启动流程**
 
-删掉 Task 5 留下的 `tempStart()` 以及那段临时的 `document.addEventListener('click', ...)`，换成下面这套：
+删掉 Task 5 留下的 `tempStart()` 以及那段临时的 `document.addEventListener('click', ...)`。
+
+同时把模块顶部的 `let timerId = null;` 改成：
+
+```js
+  let timerId = null;
+  let frameStarted = false;   // 见 start()：音频丢失后遮罩会回来，用户再点一次时不能叠第二个 rAF 循环
+```
+
+然后换成下面这套：
 
 ```js
   // 前瞻调度：提前把音频排进 AudioContext 的采样级时间轴。
