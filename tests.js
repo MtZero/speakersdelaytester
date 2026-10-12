@@ -226,6 +226,9 @@
     eq(T.pendingBeats(0, 1590, 1100, 0, 500, 1740).indices.join(','), '0');
     // now=1596 时分界线 1601，第 0 拍已经被判定为过去，丢掉。
     eq(T.pendingBeats(0, 1596, 1100, 0, 500, 1740).indices.join(','), '');
+    // 恰好压线（atMs === now+5）也要丢掉。这里必须和 audio.js 的 cancelPending 用
+    // 同一个严格比较：一个说"还算数"、另一个说"已经过去了"，就会两头都不管这一拍。
+    eq(T.pendingBeats(0, 1595, 1100, 0, 500, 1740).indices.length, 0);
     // 窗口还没够到任何一拍
     const r = T.pendingBeats(0, 1000, 1100, 0, 500, 1120);
     eq(r.indices.length, 0);
@@ -251,6 +254,46 @@
         eq(hit.opacity, 1, 't=' + tMs + ' 压点的扫描头应当是全亮的');
       }
     }
+  });
+
+  // ─────────── 多语种 ───────────
+
+  run('i18n: 中英文案表的键完全一致', function () {
+    const zh = Object.keys(SDT.i18n.strings.zh).sort();
+    const en = Object.keys(SDT.i18n.strings.en).sort();
+    eq(zh.join(','), en.join(','), 'zh 与 en 的键集合');
+    for (const k of zh) {
+      if (!SDT.i18n.strings.zh[k]) throw new Error('zh.' + k + ' 是空的');
+      if (!SDT.i18n.strings.en[k]) throw new Error('en.' + k + ' 是空的');
+    }
+  });
+
+  run('i18n.resolve: 用户选过的语言优先', function () {
+    eq(SDT.i18n.resolve('zh', 'en-US'), 'zh');
+    eq(SDT.i18n.resolve('en', 'zh-CN'), 'en');
+  });
+
+  run('i18n.resolve: 没选过就看浏览器语言，中文只有 zh 开头才认', function () {
+    eq(SDT.i18n.resolve(null, 'zh-CN'), 'zh');
+    eq(SDT.i18n.resolve(null, 'zh'), 'zh');
+    eq(SDT.i18n.resolve(null, 'zh-Hant-TW'), 'zh');
+    eq(SDT.i18n.resolve(null, 'en-US'), 'en');
+    eq(SDT.i18n.resolve(null, 'fr-FR'), 'en');
+    eq(SDT.i18n.resolve(null, ''), 'en');
+    eq(SDT.i18n.resolve(null, undefined), 'en');
+  });
+
+  run('i18n.resolve: 非法的已存值当作没存过', function () {
+    eq(SDT.i18n.resolve('klingon', 'zh-CN'), 'zh');
+    eq(SDT.i18n.resolve(123, 'en-US'), 'en');
+  });
+
+  run('i18n.t: 取文案，缺键时回落到键名而不是 undefined', function () {
+    eq(SDT.i18n.t('app.title', 'zh'), '延迟测试');
+    eq(SDT.i18n.t('app.title', 'en'), 'Latency Test');
+    eq(SDT.i18n.t('controls.reset', 'zh'), '归零');
+    eq(SDT.i18n.t('nope.missing', 'zh'), 'nope.missing');
+    eq(SDT.i18n.t('app.title', 'klingon'), 'Latency Test', '未知语言回落到 en');
   });
 
 })(typeof window !== 'undefined' ? window : globalThis);
