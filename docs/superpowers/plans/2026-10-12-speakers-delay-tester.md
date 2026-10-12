@@ -1147,11 +1147,18 @@ git rm app.css app.js
 
 打开 `index.html`。控制台会报 `audio.js` 和 `app.js` 找不到 —— **这是预期的**，它们分别在 Task 4 和 Task 5 才创建。
 
-此时所有挂着 `data-i18n` 的位置都是**空白**（文案由 JS 写入，而 `app.js` 还没接线）。在控制台跑一句，用真实机制把文案填进去：
+此时所有挂着 `data-i18n` 的位置都是**空白**（文案由 JS 写入，而 `app.js` 还没接线），而且 4 个点、4 个刻度全都叠在最左边（x 坐标由 Task 5 的 JS 写）。在控制台跑下面这段，把文案填上、把坐标摆开：
 
 ```js
 SDT.i18n.apply(SDT.i18n.detect(), document);
+document.getElementById('start-overlay').hidden = true;
+document.getElementById('app').hidden = false;
+document.querySelectorAll('.dot, .tick').forEach(function (el) {
+  el.style.left = ((Number(el.dataset.beat) + 1) * 20) + '%';   // 20/40/60/80%
+});
 ```
+
+（`(i + 1) * 20%` 就是 `timing.js` 的 `dotPosition(i, segments)` —— 5 段 4 点。Task 5 里这两件事都由 `app.js` 做，这里只是让人眼能提前看到布局。）
 
 Expected（对照已确认的原型 `.superpowers/brainstorm/90265-1791777941/content/page-layout.html`）：
 
